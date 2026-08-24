@@ -1,0 +1,13 @@
+psycopg[binary]
+pgvector
+google-genai
+google-cloud-discoveryengine
+ragas
+datasets
+python-dotenv
+langchain-google-vertexai
+pandas
+pytest
+pyliquibase
+cloud-sql-python-connector[psycopg]
+pyyaml

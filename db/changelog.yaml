@@ -1,0 +1,75 @@
+databaseChangeLog:
+  # 1. Enable the pgvector extension
+  - changeSet:
+      id: 1-enable-pgvector
+      author: ilja_michajlow
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: CREATE EXTENSION IF NOT EXISTS vector;
+      rollback:
+        - sql:
+            dbms: postgresql
+            sql: DROP EXTENSION IF EXISTS vector;
+
+  # 2. Create the documents table
+  - changeSet:
+      id: 2-create-documents-table
+      author: ilja_michajlow
+      changes:
+        - createTable:
+            tableName: documents
+            columns:
+              - column:
+                  name: id
+                  type: BIGSERIAL
+                  constraints:
+                    primaryKey: true
+                    nullable: false
+              - column:
+                  name: content
+                  type: TEXT
+                  constraints:
+                    nullable: false
+              - column:
+                  name: metadata
+                  type: JSONB
+              - column:
+                  name: embedding
+                  type: vector(768)
+
+  # 3. Add generated tsvector column for Full-Text Search
+  - changeSet:
+      id: 3-add-fts-generated-column
+      author: ilja_michajlow
+      changes:
+        - sql:
+            dbms: postgresql
+            sql: ALTER TABLE documents ADD COLUMN text_search_tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', COALESCE(content, ''))) STORED;
+      rollback:
+        - dropColumn:
+            columnName: text_search_tsv
+            tableName: documents
+
+  # 4. Create Indexes for Vector Search and Full-Text Search
+  - changeSet:
+      id: 4-create-indexes
+      author: ilja_michajlow
+      changes:
+        - createIndex:
+            indexName: idx_documents_fts
+            tableName: documents
+            columns:
+              - column:
+                  name: text_search_tsv
+        - sql:
+            dbms: postgresql
+            sql: CREATE INDEX IF NOT EXISTS idx_documents_embedding_hnsw ON documents USING hnsw (embedding vector_cosine_ops);
+      rollback:
+        - dropIndex:
+            indexName: idx_documents_fts
+            tableName: documents
+        - sql:
+            dbms: postgresql
+            sql: DROP INDEX IF EXISTS idx_documents_embedding_hnsw;
+
