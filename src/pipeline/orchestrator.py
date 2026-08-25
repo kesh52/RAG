@@ -63,7 +63,7 @@ class RAGPipeline:
         context_parts = []
         for doc in retrieved_contexts:
             metadata = doc.get("metadata") or {}
-            url = metadata.get("source_url", "Unknown source")
+            url = metadata.get("image_url") or metadata.get("pdf_url") or metadata.get("source_url", "Unknown source")
             context_parts.append(f"[Source: {url}]\n{doc['content']}")
         context_block = "\n\n".join(context_parts)
 
@@ -71,21 +71,20 @@ class RAGPipeline:
         {context_block}
 
         Question: {query}
-        Answer the question concisely and in complete sentences, strictly based on the context above. Inline cite the source URLs for your statements where appropriate:"""
+        Answer the question concisely and in complete sentences, focusing strictly and directly on the specific item asked. Ignore any unrelated topics or adjacent information present in the context. Inline cite the source URLs for your statements where appropriate:"""
 
         gen_res = self.generator_client.models.generate_content(
             model=self.generator_model,
             contents=prompt,
         )
 
-        # Extract unique source URLs for reference
+        # Extract unique source URLs (prioritizing direct image/PDF file links over parent page URL)
         sources = []
         for doc in retrieved_contexts:
-            metadata = doc.get("metadata")
-            if metadata and "source_url" in metadata:
-                url = metadata["source_url"]
-                if url and url not in sources:
-                    sources.append(url)
+            metadata = doc.get("metadata") or {}
+            url = metadata.get("image_url") or metadata.get("pdf_url") or metadata.get("source_url")
+            if url and url not in sources:
+                sources.append(url)
 
         # Append reference links footer to the final response text
         response_text = gen_res.text.strip()

@@ -11,40 +11,62 @@ class BaseConfluenceClient(ABC):
     """Abstract base class defining the Confluence API client interface."""
     
     @abstractmethod
-    def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str]]:
-        """Fetch the text content and linked page identifiers from a page.
+    def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str], list[str], list[str]]:
+        """Fetch the text content, page links, image links, and PDF attachment links from a page.
 
         Returns:
-            A tuple of (text_content, list_of_linked_identifiers)
+            A tuple of (text_content, page_links, image_links, pdf_links)
+        """
+        pass
+
+    @abstractmethod
+    def download_attachment(self, attachment_url: str) -> bytes:
+        """Download binary attachment content from Confluence.
+
+        Returns:
+            Binary bytes content of the downloaded file.
         """
         pass
 
 
 class ConfluenceHTMLParser(HTMLParser):
-    """HTML parser to extract text content and absolute links from HTML body."""
+    """HTML parser to extract text content, page links, images, and PDF attachments from HTML body."""
     
     def __init__(self, base_url: str):
         super().__init__()
         self.base_url = base_url
         self.links = []
+        self.images = []
+        self.pdfs = []
         self.text_parts = []
 
     def handle_starttag(self, tag, attrs):
         if tag == "a":
             for attr, value in attrs:
                 if attr == "href" and value:
-                    # Construct absolute URL using base Confluence URL
                     absolute_url = urljoin(self.base_url, value)
-                    self.links.append(absolute_url)
+                    # Check if link points to a PDF attachment
+                    if absolute_url.lower().endswith(".pdf") or "/download/attachments/" in absolute_url.lower():
+                        if absolute_url not in self.pdfs:
+                            self.pdfs.append(absolute_url)
+                    else:
+                        if absolute_url not in self.links:
+                            self.links.append(absolute_url)
+        elif tag == "img":
+            for attr, value in attrs:
+                if attr == "src" and value:
+                    absolute_url = urljoin(self.base_url, value)
+                    if absolute_url not in self.images:
+                        self.images.append(absolute_url)
 
     def handle_data(self, data):
         self.text_parts.append(data)
 
-    def get_parsed_data(self) -> tuple[str, list[str]]:
+    def get_parsed_data(self) -> tuple[str, list[str], list[str], list[str]]:
         text = " ".join(part.strip() for part in self.text_parts if part.strip())
         # Clean up double spacing
         text = re.sub(r"\s+", " ", text).strip()
-        return text, self.links
+        return text, self.links, self.images, self.pdfs
 
 
 class APIConfluenceClient(BaseConfluenceClient):
@@ -72,7 +94,7 @@ class APIConfluenceClient(BaseConfluenceClient):
             
         raise ValueError(f"Could not extract a valid page ID from: {page_id_or_url}")
 
-    def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str]]:
+    def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str], list[str], list[str]]:
         page_id = self._extract_page_id(page_id_or_url)
         api_url = f"{self.base_url}/wiki/rest/api/content/{page_id}?expand=body.storage"
         
@@ -83,12 +105,18 @@ class APIConfluenceClient(BaseConfluenceClient):
         data = response.json()
         html_content = data.get("body", {}).get("storage", {}).get("value", "")
         
-        # Parse the HTML content for links and text
+        # Parse the HTML content for links, images, and PDFs
         parser = ConfluenceHTMLParser(self.base_url)
         parser.feed(html_content)
-        text, links = parser.get_parsed_data()
+        text, links, images, pdfs = parser.get_parsed_data()
         
-        return text, links
+        return text, links, images, pdfs
+
+    def download_attachment(self, attachment_url: str) -> bytes:
+        logger.info(f"Downloading attachment from URL: {attachment_url}")
+        response = requests.get(attachment_url, auth=self.auth, timeout=30)
+        response.raise_for_status()
+        return response.content
 
 
 class RecursiveCrawler:
@@ -133,8 +161,12 @@ class RecursiveCrawler:
             visited.add(norm_id)
 
             try:
-                text, links = self.client.get_page_content_and_links(current_id)
-                crawled_data[current_id] = text
+                text, links, images, pdfs = self.client.get_page_content_and_links(current_id)
+                crawled_data[current_id] = {
+                    "text": text,
+                    "images": images,
+                    "pdfs": pdfs
+                }
                 
                 # Expand links if we haven't reached the max depth boundary
                 if depth < self.max_depth:

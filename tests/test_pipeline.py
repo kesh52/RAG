@@ -170,3 +170,36 @@ def test_rag_pipeline_execution():
     
     mock_retriever.vector_search.assert_called_once()
     mock_reranker.rank_candidates.assert_not_called()
+
+
+def test_rag_pipeline_source_link_priority():
+    """Verify that retrieve_and_generate prioritizes image_url and pdf_url over source_url."""
+    mock_emb_service = MagicMock()
+    mock_emb_service.get_dense_embedding.return_value = [0.4] * 768
+
+    mock_retriever = MagicMock()
+    # Mock documents returned having image_url and pdf_url respectively
+    mock_retriever.vector_search.return_value = [
+        {"content": "chunk_img", "metadata": {"source_url": "page_url", "image_url": "file_url_img.png"}},
+        {"content": "chunk_pdf", "metadata": {"source_url": "page_url", "pdf_url": "file_url_doc.pdf"}}
+    ]
+
+    mock_reranker = MagicMock()
+    mock_gen_res = MagicMock()
+    mock_gen_res.text = "Mock response"
+    mock_gen_client = MagicMock()
+    mock_gen_client.models.generate_content.return_value = mock_gen_res
+
+    pipeline = RAGPipeline(
+        embedding_service=mock_emb_service,
+        retriever=mock_retriever,
+        reranker=mock_reranker,
+        generator_client=mock_gen_client,
+        generator_model="mock-gemini"
+    )
+
+    res = pipeline.retrieve_and_generate("query", use_hybrid=False, use_reranker=False, final_top_k=2)
+    
+    # Assert that image_url and pdf_url were collected instead of page_url
+    assert res["sources"] == ["file_url_img.png", "file_url_doc.pdf"]
+    assert res["response"] == "Mock response\n\nSources:\n- file_url_img.png\n- file_url_doc.pdf"

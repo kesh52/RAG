@@ -27,6 +27,12 @@ pipeline:
   chunk_size: 500
   chunk_overlap: 50
 
+crawler:
+  allowed_domain_pattern: "${CRAWLER_ALLOWED_DOMAIN_PATTERN:}"
+  asset_storage_type: "${CRAWLER_ASSET_STORAGE_TYPE:local}"
+  local_assets_dir: "${CRAWLER_LOCAL_ASSETS_DIR:assets/uploaded}"
+  gcs_bucket_name: "${CRAWLER_GCS_BUCKET_NAME:my-rag-assets}"
+
 logging:
   level: "INFO"
   file_path: "logs/pipeline.log"

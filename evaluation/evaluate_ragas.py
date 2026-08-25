@@ -37,6 +37,14 @@ benchmark_cases = [
     {
         "query": "What is the role of the Vertex AI Semantic Ranker in a RAG pipeline?",
         "reference": "The Vertex AI Semantic Ranker acts as a cross-encoder that jointly scores query-document pairs to rerank candidate chunks and filter out irrelevant search results."
+    },
+    {
+        "query": "What are the key elements of Spring Batch according to the PDF manual?",
+        "reference": "The Spring Batch manual states it is structured around Job, Step, ItemReader, and ItemWriter elements."
+    },
+    {
+        "query": "Describe the colors and flow of the database cluster layout gradient image",
+        "reference": "The image features a smooth, continuous color gradient of earthy tones (browns, olives, and golden yellows) transitioning from dark sepia in the top-left to a bright gold/olive in the top-right."
     }
 ]
 

@@ -14,6 +14,8 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
 ├── alembic/                     # Alembic database migrations
 │   ├── env.py                   # Migration environment setup
 │   └── versions/                # Database version migration scripts
+├── assets/                      # Visual and attachment assets storage
+│   └── uploaded/                # Local target directory for crawler downloaded files
 ├── docs/                        # Project documentation
 │   └── package_structure.md     # Package restructuring design plan
 ├── src/                         # Core Python package
@@ -38,9 +40,11 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
 │       ├── chunking.py          # Sliding-window text chunker
 │       └── pipeline.py          # ETL orchestrator
 ├── scripts/                     # Executable scripts
+│   ├── assets/                  # Seed generator mock assets (PDFs, BMP images)
 │   ├── check_connection.py      # Test database connectivity and print diagnostic info
 │   ├── clear_db.py              # Drop all tables in the connected database schema
 │   ├── seed_db.py               # Seed PostgreSQL with documents and embeddings
+│   ├── run_etl.py               # Run Confluence crawler ETL pipeline against a live target
 │   ├── run_pipeline.py          # Run query pipeline via command line
 │   ├── run_migrations.py        # Run Alembic database migrations programmatically
 │   └── start_proxy.py           # Launch Cloud SQL Auth Proxy secure tunnel
@@ -106,6 +110,9 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
     Execute queries using the hybrid/reranked RAG pipeline:
     ```bash
     python3 -m scripts.run_pipeline "What index does PostgreSQL use for vector similarity search?"
+
+    File as source example
+    python3 -m scripts.run_pipeline 'What elements make up Spring Batch according to the manual?'
     ```
 
 7.  **Run Evaluations**:

@@ -17,3 +17,7 @@ env/
 .vscode/
 .idea/
 
+# Run-time downloaded assets
+assets/
+
+

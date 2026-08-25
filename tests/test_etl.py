@@ -13,29 +13,33 @@ class MockConfluenceClient(BaseConfluenceClient):
     def __init__(self):
         self.domain = "wiki.example.com"
         # Directed graph layout representing page IDs and their content + links
-        # Schema: page_id -> (text_content, linked_page_ids)
+        # Schema: page_id -> (text_content, linked_page_ids, image_links, pdf_links)
         self.site_graph = {
             # Root (Depth 0)
-            "root_page": ("Welcome to our wiki root page", ["page_d1_a", "page_d1_b"]),
+            "root_page": ("Welcome to our wiki root page", ["page_d1_a", "page_d1_b"], [], []),
             
             # Level 1 (Depth 1)
-            "page_d1_a": ("This is depth 1 page A details", ["page_d2_a"]),
-            # Circular link to root_page included here to test cycle prevention
-            "page_d1_b": ("This is depth 1 page B details", ["page_d2_b", "root_page"]), 
+            "page_d1_a": ("This is depth 1 page A details", ["page_d2_a"], [], []),
+            "page_d1_b": ("This is depth 1 page B details", ["page_d2_b", "root_page"], [], []), 
             
             # Level 2 (Depth 2)
-            # Links to depth 3 page included to verify boundary constraints
-            "page_d2_a": ("Deep info page at depth 2 A", ["page_d3_a"]), 
-            "page_d2_b": ("Deep info page at depth 2 B", []),
+            "page_d2_a": ("Deep info page at depth 2 A", ["page_d3_a"], [], []), 
+            "page_d2_b": ("Deep info page at depth 2 B", [], [], []),
             
             # Level 3 (Depth 3 - must not be crawled when max_depth=2)
-            "page_d3_a": ("This content should be unreachable during crawl", [])
+            "page_d3_a": ("This content should be unreachable during crawl", [], [], [])
         }
 
-    def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str]]:
+    def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str], list[str], list[str]]:
         if page_id_or_url in self.site_graph:
-            return self.site_graph[page_id_or_url]
+            val = self.site_graph[page_id_or_url]
+            if len(val) == 2:
+                return val[0], val[1], [], []
+            return val
         raise KeyError(f"Page {page_id_or_url} not found in mock graph.")
+
+    def download_attachment(self, attachment_url: str) -> bytes:
+        return b"mock binary content"
 
 
 class MockEmbeddingService(BaseEmbeddingService):
@@ -93,7 +97,7 @@ def test_recursive_crawler_depth_and_cycles():
     assert "page_d3_a" not in crawled_data
     
     assert len(crawled_data) == 5
-    assert crawled_data["root_page"] == "Welcome to our wiki root page"
+    assert crawled_data["root_page"]["text"] == "Welcome to our wiki root page"
 
 
 def test_recursive_crawler_domain_restrictions():
@@ -156,4 +160,44 @@ def test_confluence_etl_pipeline_run():
     assert mock_db_factory.call_count == 1
     assert mock_cursor.execute.call_count == 3
     assert mock_conn.commit.call_count == 1
+
+
+def test_confluence_etl_pipeline_multimodal_ingestion():
+    """Verify that ConfluenceETLPipeline downloads, transcribes, and inserts images and PDFs."""
+    client = MockConfluenceClient()
+    # Configure root_page to have 1 image link and 1 PDF link
+    client.site_graph["root_page"] = (
+        "Welcome to our wiki root page",
+        [],
+        ["https://wiki.example.com/download/attachments/logo.png"],
+        ["https://wiki.example.com/download/attachments/spec.pdf"]
+    )
+    
+    chunker = RecursiveTextChunker(chunk_size=300, chunk_overlap=10)
+    emb_service = MockEmbeddingService()
+    
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    
+    mock_db_factory = MagicMock()
+    mock_db_factory.return_value = mock_conn
+
+    pipeline = ConfluenceETLPipeline(
+        confluence_client=client,
+        chunker=chunker,
+        embedding_service=emb_service,
+        db_conn_factory=mock_db_factory
+    )
+    
+    ingested_count = pipeline.run("root_page", max_depth=0)
+    
+    # Ingested chunks:
+    # 1. Plain text page: "Welcome to our wiki root page" (1 chunk)
+    # 2. Image: downloaded, saved, transcribed (1 chunk) -> since Gemini client is mocked/None, gets fallback text
+    # 3. PDF: downloaded, saved, transcribed (1 chunk)
+    # Total = 3 chunks!
+    assert ingested_count == 3
+    assert mock_cursor.execute.call_count == 3
+
 
