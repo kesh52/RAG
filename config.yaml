@@ -2,12 +2,15 @@
 # Sensitive configurations resolve dynamically using environment variables (${VAR_NAME:default_value}).
 
 database:
+  type: "cloud_sql"
   host: "${DB_HOST:127.0.0.1}"
   port: "${DB_PORT:5432}"
   name: "${DB_NAME:vector}"
   user: "${DB_USER:postgres}"
   password: "${DB_PASSWORD:}"
-  instance_connection_name: "${INSTANCE_CONNECTION_NAME:}"
+  instance_connection_name: "${INSTANCE_CONNECTION_NAME:woven-spring-288610:europe-west3:free-trial-first-project}"
+  impersonate_service_account: "${IMPERSONATE_SERVICE_ACCOUNT:}"
+  ip_type: "${DB_IP_TYPE:public}"
 
 gcp:
   project: "${GCP_PROJECT:woven-spring-288610}"

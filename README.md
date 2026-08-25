@@ -10,8 +10,10 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
 ├── pytest.ini                   # Pytest configuration file
 ├── architecture.md              # Pipeline architecture and class diagrams
 ├── config.yaml                  # Central configuration parameters
-├── db/                          # Database migration definitions
-│   └── changelog.yaml           # Liquibase database schema definition
+├── alembic.ini                  # Alembic migrations configuration file
+├── alembic/                     # Alembic database migrations
+│   ├── env.py                   # Migration environment setup
+│   └── versions/                # Database version migration scripts
 ├── docs/                        # Project documentation
 │   └── package_structure.md     # Package restructuring design plan
 ├── src/                         # Core Python package
@@ -29,19 +31,26 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
 │   ├── reranking/               # Reranking package
 │   │   ├── base.py              # Reranker interface
 │   │   └── vertex.py            # Vertex Semantic Ranker implementation
-│   └── pipeline/                # Orchestrator package
-│       └── orchestrator.py      # RAG Pipeline orchestrator
+│   ├── pipeline/                # Orchestrator package
+│   │   └── orchestrator.py      # RAG Pipeline orchestrator
+│   └── etl/                     # ETL crawler package
+│       ├── confluence.py        # Confluence scrapers and BFS crawlers
+│       ├── chunking.py          # Sliding-window text chunker
+│       └── pipeline.py          # ETL orchestrator
 ├── scripts/                     # Executable scripts
+│   ├── check_connection.py      # Test database connectivity and print diagnostic info
+│   ├── clear_db.py              # Drop all tables in the connected database schema
 │   ├── seed_db.py               # Seed PostgreSQL with documents and embeddings
 │   ├── run_pipeline.py          # Run query pipeline via command line
-│   ├── run_migrations.py        # Run database migrations using pyliquibase
+│   ├── run_migrations.py        # Run Alembic database migrations programmatically
 │   └── start_proxy.py           # Launch Cloud SQL Auth Proxy secure tunnel
 ├── evaluation/                  # Comparative evaluation runner
 │   └── evaluate_ragas.py        # Compares basic vs advanced pipeline with Ragas
 └── tests/                       # Unit and integration tests
     ├── conftest.py              # Pytest configuration and environment setup
     ├── test_db.py               # Database connection tests
-    └── test_pipeline.py         # Mock pipeline tests
+    ├── test_pipeline.py         # Mock pipeline tests
+    └── test_etl.py              # ETL pipeline unit tests
 ```
 
 ## Setup Instructions
@@ -74,14 +83,18 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
     ```
     Keep this process running in a dedicated terminal window while using the database.
 
+    *Verify Connection (Optional)*:
+    You can diagnose and test database connectivity and configuration parameters at any time by running:
+    ```bash
+    python3 -m scripts.check_connection
+    ```
+
 4.  **Run Database Migrations**:
-    Apply the database schema (including enabling pgvector and creating the documents table) using Liquibase:
+    Apply the database schema (enabling pgvector, creating the documents table, generated FTS column, and HNSW/GIN indexes) using Alembic:
     ```bash
     python3 -m scripts.run_migrations
     ```
-    *Notes:*
-    * *Since Liquibase is Java-based, you must have a Java Runtime Environment (JRE) installed on your system to run the migrations.*
-    * *On macOS, if you encounter `[SSL: CERTIFICATE_VERIFY_FAILED]` when downloading Liquibase, execute Python's built-in certificate installer command: `/Applications/Python\ 3.14/Install\ Certificates.command` (adjust the version folder name matching your Python version).*
+    This script programmatically runs the Alembic migration engine and applies the initial schema revision to your database instance.
 
 5.  **Seed Database**:
     Ingest sample documents and generate/store vector embeddings into PostgreSQL:

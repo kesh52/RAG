@@ -13,7 +13,7 @@ class VertexReranker(BaseReranker):
         self.location = location
         self.model_name = model_name
 
-    def rank_candidates(self, query: str, candidates: list[str], top_n: int = 2) -> list[str]:
+    def rank_candidates(self, query: str, candidates: list[dict], top_n: int = 2) -> list[dict]:
         """Stage 2: Cross-encoder reranking using Vertex AI Semantic Ranker."""
         if not candidates:
             logger.debug("No candidates to rerank")
@@ -21,8 +21,8 @@ class VertexReranker(BaseReranker):
         
         logger.debug(f"Reranking {len(candidates)} candidates using model '{self.model_name}' (top_n={top_n})")
         records = [
-            discoveryengine.RankingRecord(id=str(idx), content=doc_text)
-            for idx, doc_text in enumerate(candidates)
+            discoveryengine.RankingRecord(id=str(idx), content=doc["content"])
+            for idx, doc in enumerate(candidates)
         ]
         ranking_config = self.rank_client.ranking_config_path(
             project=self.project,
@@ -37,7 +37,6 @@ class VertexReranker(BaseReranker):
             top_n=top_n
         )
         response = self.rank_client.rank(request=request)
-        results = [record.content for record in response.records]
+        results = [candidates[int(record.id)] for record in response.records]
         logger.debug(f"Semantic Ranker completed: returned {len(results)} reranked contexts")
         return results
-

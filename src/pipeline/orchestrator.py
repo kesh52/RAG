@@ -58,23 +58,47 @@ class RAGPipeline:
 
         # 4. Stage 3: Answer Generation
         logger.debug(f"Generating response using model '{self.generator_model}' with {len(retrieved_contexts)} context chunks...")
-        context_block = "\n".join(retrieved_contexts)
+        
+        # Build context blocks with source prefixing
+        context_parts = []
+        for doc in retrieved_contexts:
+            metadata = doc.get("metadata") or {}
+            url = metadata.get("source_url", "Unknown source")
+            context_parts.append(f"[Source: {url}]\n{doc['content']}")
+        context_block = "\n\n".join(context_parts)
+
         prompt = f"""Context:
         {context_block}
 
         Question: {query}
-        Answer the question concisely and in complete sentences, strictly based on the context above:"""
+        Answer the question concisely and in complete sentences, strictly based on the context above. Inline cite the source URLs for your statements where appropriate:"""
 
         gen_res = self.generator_client.models.generate_content(
             model=self.generator_model,
             contents=prompt,
         )
 
+        # Extract unique source URLs for reference
+        sources = []
+        for doc in retrieved_contexts:
+            metadata = doc.get("metadata")
+            if metadata and "source_url" in metadata:
+                url = metadata["source_url"]
+                if url and url not in sources:
+                    sources.append(url)
+
+        # Append reference links footer to the final response text
+        response_text = gen_res.text.strip()
+        if sources:
+            sources_footer = "\n\nSources:\n" + "\n".join(f"- {src}" for src in sources)
+            response_text += sources_footer
+
         logger.info("RAG pipeline execution completed successfully.")
         return {
             "user_input": query,
-            "retrieved_contexts": retrieved_contexts,
-            "response": gen_res.text.strip(),
+            "retrieved_contexts": [doc["content"] for doc in retrieved_contexts],
+            "sources": sources,
+            "response": response_text,
         }
 
 

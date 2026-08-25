@@ -1,45 +1,39 @@
 import os
 import sys
-import tempfile
-from dotenv import load_dotenv
-from pyliquibase import Pyliquibase
+import logging
+from alembic.config import Config
+from alembic import command
+
+# Ensure root directory is in system path to resolve src imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("run_migrations")
 
 def run_migrations():
-    # Load environment variables
-    load_dotenv()
+    logger.info("Initializing Alembic migration runner...")
     
-    db_host = os.getenv("DB_HOST", "127.0.0.1")
-    db_port = os.getenv("DB_PORT", "5432")
-    db_name = os.getenv("DB_NAME", "vector")
-    db_user = os.getenv("DB_USER", "postgres")
-    db_password = os.getenv("DB_PASSWORD", "")
+    # Resolve the path to alembic.ini relative to the script location
+    root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    alembic_ini_path = os.path.join(root_dir, "alembic.ini")
     
-    jdbc_url = f"jdbc:postgresql://{db_host}:{db_port}/{db_name}"
-    
-    print(f"JDBC URL: {jdbc_url}")
-    print(f"User:     {db_user}")
-    
-    # Create a temporary liquibase.properties file
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".properties") as f:
-        f.write(f"url: {jdbc_url}\n")
-        f.write(f"username: {db_user}\n")
-        f.write(f"password: {db_password}\n")
-        f.write("changeLogFile: db/changelog.yaml\n")
-        properties_path = f.name
-
-    try:
-        liquibase = Pyliquibase(defaultsFile=properties_path)
-        print("Running database update...")
-        liquibase.update()
-        print("Database migrations applied successfully!")
-    except Exception as e:
-        print(f"Error executing migrations: {e}", file=sys.stderr)
+    if not os.path.exists(alembic_ini_path):
+        logger.error(f"alembic.ini not found at: {alembic_ini_path}")
         sys.exit(1)
-    finally:
-        # Clean up the temporary file
-        if os.path.exists(properties_path):
-            os.remove(properties_path)
+        
+    try:
+        # Load the Alembic configuration
+        alembic_cfg = Config(alembic_ini_path)
+        
+        logger.info("Applying database migrations to head...")
+        # Programmatically run 'alembic upgrade head'
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Database migrations applied successfully!")
+        
+    except Exception as e:
+        logger.error(f"Error applying database migrations: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     run_migrations()
-

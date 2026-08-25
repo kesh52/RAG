@@ -1,8 +1,14 @@
 import os
+import sys
+from contextlib import closing
 from google.genai import types as genai_types
 import psycopg
 from pgvector.psycopg import register_vector
 from google import genai
+
+# Ensure root directory is in system path to resolve src imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import src.db as db
 
 def generate_and_insert_embeddings():
@@ -59,6 +65,10 @@ def generate_and_insert_embeddings():
         }
     ]
 
+    # Add source_url dynamically to each mock document metadata for pipeline compat
+    for idx, doc in enumerate(documents):
+        doc["metadata"]["source_url"] = f"https://confluence.example.com/wiki/pages/viewpage.action?pageId={1000 + idx}"
+
     texts = [doc["content"] for doc in documents]
 
     print("Generating embeddings using text-embedding-005...")
@@ -74,7 +84,7 @@ def generate_and_insert_embeddings():
     embeddings = [emb.values for emb in response.embeddings]
 
     print("Connecting to PostgreSQL and inserting document embeddings...")
-    with db.get_connection() as conn:
+    with closing(db.get_connection()) as conn:
         register_vector(conn)
         with conn.cursor() as cur:
             insert_query = """

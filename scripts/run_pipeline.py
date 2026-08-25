@@ -1,5 +1,10 @@
 import sys
+import os
 import argparse
+
+# Ensure root directory is in system path to resolve src imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from src.pipeline import get_default_pipeline
 
 def main():

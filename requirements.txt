@@ -11,3 +11,4 @@ pytest
 pyliquibase
 cloud-sql-python-connector[psycopg]
 pyyaml
+alembic

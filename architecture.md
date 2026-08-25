@@ -11,6 +11,10 @@ This document describes the modular object-oriented design of the RAG pipeline.
 | **`VertexReranker`** | Reranks Stage 1 candidates using cross-encoder scoring (Vertex AI Semantic Ranker) to eliminate false positives. | `rank_candidates()` |
 | **`RAGPipeline`** | Orchestrates the end-to-end RAG flow: embeds the query, retrieves candidates, reranks them, constructs the context prompt, and generates the final answer. | `retrieve_and_generate()` |
 | **`db` (Module helper)** | Manages database connections dynamically, using the native `google-cloud-sql-connector` if configured or falling back to TCP socket connections. | `get_connection()` |
+| **`APIConfluenceClient`** | Fetches XHTML storage data and absolute links from Confluence pages using standard HTTP authentication. | `get_page_content_and_links(page_id)` |
+| **`RecursiveCrawler`** | Orchestrates BFS crawling starting from a root page, enforcing a maximum depth constraint of 2 and skipping circular references. | `crawl(root_id)` |
+| **`RecursiveTextChunker`** | Splits structured plain text into overlap-aware segments using recursive delimiter fallback boundaries (`\n\n`, `\n`, ` `, `""`). | `split_text(text)` |
+| **`ConfluenceETLPipeline`** | End-to-end runner that crawls Confluence, chunks text, generates embeddings, and saves outputs in transactions to PostgreSQL. | `run(root_id)` |
 
 ---
 
@@ -70,4 +74,40 @@ sequenceDiagram
     Pipeline-->>User: result dict (user_input, retrieved_contexts, response)
     deactivate Pipeline
 ```
+
+---
+
+## Confluence ETL & Recursive Chunking Architecture
+
+The Confluence ETL (Extract, Transform, Load) component parses unstructured XHTML documents, chunks them while preserving semantic boundaries, and stores them in PostgreSQL.
+
+### ETL Data Flow
+
+This diagram illustrates how raw Confluence storage XHTML is transformed into vector embeddings and ingested:
+
+```mermaid
+graph TD
+    A["Confluence Storage XHTML<br/>(e.g., &lt;h1&gt;Header&lt;/h1&gt;&lt;p&gt;Paragraph&lt;/p&gt;)"] 
+    --> B["Extraction (ConfluenceHTMLParser)"]
+    B -->|Strip tags, preserve spacing| C["Structured Plain Text<br/>(e.g., 'Header\n\nParagraph')"]
+    C --> D["Recursive Character Splitter"]
+    D -->|Step 1: Split by '\n\n'| E["Paragraph / Header Splits"]
+    E -->|Step 2: Split by '\n' if too long| F["Sentence / List Item Splits"]
+    F -->|Step 3: Split by ' ' if too long| G["Word Splits"]
+    G --> H["Overlap-Aware Merger"]
+    H -->|Combine splits up to chunk_size| I["Semantic Text Chunks"]
+    I --> J["Dense Embedding Generator"]
+    J --> K["PostgreSQL (pgvector)"]
+```
+
+### Recursive Splitter Delimiter Hierarchy
+
+To maintain the layout structure of documents during RAG indexing, `RecursiveTextChunker` splits text progressively:
+1. **`\n\n` (Paragraphs & Headers)**: Isolates separate topics and retains headings together with their following paragraph context.
+2. **`\n` (Sentences & List Items)**: Separates bullet-point list items or individual lines, preventing them from being sliced in half.
+3. **` ` (Words)**: Splits long sentences or table cell elements at word boundaries, ensuring complete words are never broken.
+4. **`""` (Characters)**: Absolute fallback to prevent exceeding `chunk_size` limitations.
+
+Following hierarchical splitting, splits are grouped into cohesive chunks respecting `chunk_size` and `chunk_overlap` constraints, keeping a sliding-window text overlap across chunk boundaries to ensure smooth semantic transitions during retrieval.
+
 
