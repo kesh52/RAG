@@ -30,8 +30,11 @@ class BaseConfluenceClient(ABC):
 
 
 class ConfluenceHTMLParser(HTMLParser):
-    """HTML parser to extract text content, page links, images, and PDF attachments from HTML body."""
-    
+    """HTML parser to extract structured text content, page links, images, and PDF attachments."""
+
+    BLOCK_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "div", "tr", "table", "section", "article", "blockquote", "pre"}
+    INLINE_BREAK_TAGS = {"br", "li"}
+
     def __init__(self, base_url: str):
         super().__init__()
         self.base_url = base_url
@@ -41,7 +44,11 @@ class ConfluenceHTMLParser(HTMLParser):
         self.text_parts = []
 
     def handle_starttag(self, tag, attrs):
-        if tag == "a":
+        if tag in self.BLOCK_TAGS:
+            self.text_parts.append("\n\n")
+        elif tag in self.INLINE_BREAK_TAGS:
+            self.text_parts.append("\n")
+        elif tag == "a":
             for attr, value in attrs:
                 if attr == "href" and value:
                     absolute_url = urljoin(self.base_url, value)
@@ -59,13 +66,24 @@ class ConfluenceHTMLParser(HTMLParser):
                     if absolute_url not in self.images:
                         self.images.append(absolute_url)
 
+    def handle_endtag(self, tag):
+        if tag in self.BLOCK_TAGS:
+            self.text_parts.append("\n\n")
+
     def handle_data(self, data):
         self.text_parts.append(data)
 
     def get_parsed_data(self) -> tuple[str, list[str], list[str], list[str]]:
-        text = " ".join(part.strip() for part in self.text_parts if part.strip())
-        # Clean up double spacing
-        text = re.sub(r"\s+", " ", text).strip()
+        raw_text = "".join(self.text_parts)
+        # Normalize whitespace while preserving paragraph double newlines
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_text.splitlines()]
+        cleaned_lines = []
+        for line in lines:
+            if line:
+                cleaned_lines.append(line)
+            elif cleaned_lines and cleaned_lines[-1] != "":
+                cleaned_lines.append("")
+        text = "\n".join(cleaned_lines).strip()
         return text, self.links, self.images, self.pdfs
 
 
@@ -95,14 +113,20 @@ class APIConfluenceClient(BaseConfluenceClient):
         raise ValueError(f"Could not extract a valid page ID from: {page_id_or_url}")
 
     def get_page_content_and_links(self, page_id_or_url: str) -> tuple[str, list[str], list[str], list[str]]:
+        details = self.fetch_page_details(page_id_or_url)
+        return details["text"], details["links"], details["images"], details["pdfs"]
+
+    def fetch_page_details(self, page_id_or_url: str) -> dict:
+        """Fetches page title, parsed structured text, raw HTML, links, images, and PDFs."""
         page_id = self._extract_page_id(page_id_or_url)
-        api_url = f"{self.base_url}/wiki/rest/api/content/{page_id}?expand=body.storage"
+        api_url = f"{self.base_url}/wiki/rest/api/content/{page_id}?expand=body.storage,version"
         
         logger.info(f"Fetching Confluence page ID {page_id} from API...")
         response = requests.get(api_url, auth=self.auth, timeout=15)
         response.raise_for_status()
         
         data = response.json()
+        title = data.get("title", f"Page {page_id}")
         html_content = data.get("body", {}).get("storage", {}).get("value", "")
         
         # Parse the HTML content for links, images, and PDFs
@@ -110,7 +134,17 @@ class APIConfluenceClient(BaseConfluenceClient):
         parser.feed(html_content)
         text, links, images, pdfs = parser.get_parsed_data()
         
-        return text, links, images, pdfs
+        full_text = f"# {title}\n\n{text}" if title and not text.startswith("#") else text
+
+        return {
+            "page_id": page_id,
+            "title": title,
+            "text": full_text,
+            "html": html_content,
+            "links": links,
+            "images": images,
+            "pdfs": pdfs,
+        }
 
     def download_attachment(self, attachment_url: str) -> bytes:
         logger.info(f"Downloading attachment from URL: {attachment_url}")

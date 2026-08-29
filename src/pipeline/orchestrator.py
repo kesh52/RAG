@@ -35,30 +35,60 @@ class RAGPipeline:
         use_hybrid: bool = True,
         use_reranker: bool = True,
         pool_size: int = 5,
-        final_top_k: int = 2
+        final_top_k: int = 2,
+        attached_file_bytes: bytes | None = None,
+        attached_filename: str | None = None,
+        attached_mime_type: str | None = None,
     ) -> dict:
-        """End-to-end RAG pipeline supporting dynamic feature toggles."""
-        logger.info(f"Initiating RAG pipeline execution for query: '{query}'")
-        
-        # 1. Embed query for dense searches
-        query_vector = self.embedding_service.get_dense_embedding(query)
+        """End-to-end RAG pipeline supporting dynamic feature toggles and multimodal document attachments."""
+        logger.info(f"Initiating RAG pipeline execution for query: '{query}' (attached file: {attached_filename})")
 
-        # 2. Stage 1: Retrieval
+        # 1. Prepare search query (augment with attached text if plain text / log file)
+        search_query = query
+        mime_type = attached_mime_type
+
+        if attached_file_bytes and attached_filename:
+            fn_lower = attached_filename.lower()
+            if not mime_type:
+                if fn_lower.endswith(".pdf"):
+                    mime_type = "application/pdf"
+                elif fn_lower.endswith((".png", ".bmp")):
+                    mime_type = "image/png"
+                elif fn_lower.endswith((".jpg", ".jpeg")):
+                    mime_type = "image/jpeg"
+                elif fn_lower.endswith((".txt", ".log", ".json", ".md")):
+                    mime_type = "text/plain"
+                else:
+                    mime_type = "application/octet-stream"
+
+            # If plain text or log, extract snippet to enrich the search query
+            if mime_type.startswith("text/"):
+                try:
+                    text_snippet = attached_file_bytes.decode("utf-8", errors="ignore")[:600].strip()
+                    if text_snippet:
+                        search_query = f"{query}\n[Report Snippet: {text_snippet}]"
+                except Exception:
+                    pass
+
+        # 2. Embed query for dense searches
+        query_vector = self.embedding_service.get_dense_embedding(search_query)
+
+        # 3. Stage 1: Retrieval
         if use_hybrid:
-            candidates = self.retriever.hybrid_search_rrf(query, query_vector, limit=pool_size)
+            candidates = self.retriever.hybrid_search_rrf(search_query, query_vector, limit=pool_size)
         else:
             candidates = self.retriever.vector_search(query_vector, limit=pool_size)
 
-        # 3. Stage 2: Reranking
+        # 4. Stage 2: Reranking
         if use_reranker:
-            retrieved_contexts = self.reranker.rank_candidates(query, candidates, top_n=final_top_k)
+            retrieved_contexts = self.reranker.rank_candidates(search_query, candidates, top_n=final_top_k)
         else:
             logger.debug("Semantic reranking is disabled; using top candidates directly")
             retrieved_contexts = candidates[:final_top_k]
 
-        # 4. Stage 3: Answer Generation
+        # 5. Stage 3: Answer Generation
         logger.debug(f"Generating response using model '{self.generator_model}' with {len(retrieved_contexts)} context chunks...")
-        
+
         # Build context blocks with source prefixing
         context_parts = []
         for doc in retrieved_contexts:
@@ -67,15 +97,61 @@ class RAGPipeline:
             context_parts.append(f"[Source: {url}]\n{doc['content']}")
         context_block = "\n\n".join(context_parts)
 
-        prompt = f"""Context:
-        {context_block}
+        # Format prompt according to whether an attachment (report/PDF) was provided
+        if attached_file_bytes and mime_type and mime_type != "application/octet-stream":
+            prompt_instruction = f"""Internal Runbooks & Knowledge Base Context:
+{context_block}
 
-        Question: {query}
-        Answer the question concisely and in complete sentences, focusing strictly and directly on the specific item asked. Ignore any unrelated topics or adjacent information present in the context. Inline cite the source URLs for your statements where appropriate:"""
+User Request: {query}
+
+You are an expert technical remediation specialist.
+Analyze the attached report/document alongside the internal runbooks provided above.
+Strictly structure your response into the following clear sections with these exact Markdown headers:
+
+### 1. 📌 Issue Diagnosis & Summary
+Briefly summarize the key findings, error codes, or vulnerabilities identified in the attached report.
+
+### 2. 📚 Internal Runbook Guidance (Verified from Company Documentation)
+Provide the explicit operational steps, configuration parameters, and policies directly supported by the internal context above. Every statement or step in this section MUST be grounded in the internal documentation. Inline cite the internal source URLs like `[Source: URL]`.
+
+### 3. 🌐 General Industry Best Practices (General LLM Knowledge)
+Provide complementary technical explanations, industry standards, or architectural advice that are NOT explicitly mentioned in the internal documentation. Clearly mark them as general knowledge.
+
+### 4. ✅ Verification & Prevention
+Explain how to verify the resolution succeeded and prevent recurrence.
+
+At the very end of your response, record any missing internal documentation strictly inside these tags:
+<!-- DOCUMENTATION_GAPS -->
+Explain what runbooks, policies, or topics are missing from the internal knowledge base for this request (or write NONE if fully covered).
+<!-- END_DOCUMENTATION_GAPS -->"""
+
+            llm_contents = [
+                genai_types.Part.from_bytes(data=attached_file_bytes, mime_type=mime_type),
+                prompt_instruction,
+            ]
+        else:
+            prompt = f"""Internal Knowledge Base Context:
+{context_block}
+
+Question: {query}
+
+Answer the question clearly and distinguish between internal documentation and general knowledge using these exact headers:
+
+### 📚 Internal Documentation Guidance (Verified from Company Docs)
+Directly answer based on the internal context provided above. Only include facts that exist in the internal context, and inline cite the source URLs like `[Source: URL]`.
+
+### 🌐 General Knowledge & Context (General LLM Knowledge)
+Provide helpful supplementary technical explanation, industry background, or standard best practices if relevant, clearly marked as general knowledge.
+
+At the very end of your response, record any missing internal documentation strictly inside these tags:
+<!-- DOCUMENTATION_GAPS -->
+Explain what runbooks, policies, or topics are missing from the internal knowledge base for this question (or write NONE if fully covered).
+<!-- END_DOCUMENTATION_GAPS -->"""
+            llm_contents = prompt
 
         gen_res = self.generator_client.models.generate_content(
             model=self.generator_model,
-            contents=prompt,
+            contents=llm_contents,
         )
 
         # Extract unique source URLs (prioritizing direct image/PDF file links over parent page URL)
@@ -86,8 +162,31 @@ class RAGPipeline:
             if url and url not in sources:
                 sources.append(url)
 
+        # Extract and parse documentation gaps silently from the generated text
+        import re
+        raw_text = gen_res.text.strip()
+        documentation_gaps = None
+
+        gaps_pattern = r"<!--\s*DOCUMENTATION_GAPS\s*-->([\s\S]*?)<!--\s*END_DOCUMENTATION_GAPS\s*-->"
+        gaps_match = re.search(gaps_pattern, raw_text, re.IGNORECASE)
+        if gaps_match:
+            gaps_content = gaps_match.group(1).strip()
+            raw_text = re.sub(gaps_pattern, "", raw_text, flags=re.IGNORECASE).strip()
+            if gaps_content and not gaps_content.lower().startswith("none"):
+                documentation_gaps = gaps_content
+
+        # Also strip any legacy inline gap headers from user response if generated
+        legacy_gap_pattern = r"(?:###\s*(?:\d+\.\s*)?⚠️\s*Internal Documentation Gaps[\s\S]*?)(?=(?:###|\Z))"
+        legacy_match = re.search(legacy_gap_pattern, raw_text, re.IGNORECASE)
+        if legacy_match:
+            legacy_block = legacy_match.group(0).strip()
+            legacy_body = re.sub(r"^###\s*(?:\d+\.\s*)?⚠️\s*Internal Documentation Gaps\s*", "", legacy_block, flags=re.IGNORECASE).strip()
+            raw_text = raw_text.replace(legacy_block, "").strip()
+            if legacy_body and not legacy_body.lower().startswith("none") and not documentation_gaps:
+                documentation_gaps = legacy_body
+
         # Append reference links footer to the final response text
-        response_text = gen_res.text.strip()
+        response_text = raw_text
         if sources:
             sources_footer = "\n\nSources:\n" + "\n".join(f"- {src}" for src in sources)
             response_text += sources_footer
@@ -98,7 +197,10 @@ class RAGPipeline:
             "retrieved_contexts": [doc["content"] for doc in retrieved_contexts],
             "sources": sources,
             "response": response_text,
+            "attached_filename": attached_filename,
+            "documentation_gaps": documentation_gaps,
         }
+
 
 
 def get_default_pipeline() -> RAGPipeline:

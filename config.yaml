@@ -24,8 +24,40 @@ models:
 pipeline:
   pool_size: 5
   final_top_k: 2
-  chunk_size: 500
-  chunk_overlap: 50
+
+  # Chunking Strategy Selection:
+  # - "recursive": Hierarchical delimiter splitting (splits by \n\n, \n, space, character) with overlap.
+  # - "semantic": Splits based on embedding cosine distance shifts between adjacent sentence groups.
+  chunking_strategy: "recursive"
+
+  # Recursive Chunking Parameters:
+  chunk_size: 500       # Target maximum character length per chunk.
+  chunk_overlap: 50     # Sliding character overlap across chunk boundaries.
+
+  # Semantic Chunking Parameters:
+  # 1. semantic_threshold_type: Method to calculate distance breakpoint cutoff.
+  #    - "percentile": Cutoff at N-th percentile distance (e.g. 90.0 = top 10% highest semantic shifts).
+  #    - "standard_deviation": Cutoff at mean + k * std_dev.
+  #    - "interquartile": Cutoff at Q3 + k * IQR (resilient against outliers).
+  #    - "gradient": Cutoff based on sharp rate-of-change (derivative) spikes.
+  #    - "fixed": Absolute cosine distance cutoff (0.0 to 1.0, e.g. 0.35).
+  semantic_threshold_type: "percentile"
+
+  # 2. semantic_threshold_amount: Tuning value corresponding to the chosen threshold type.
+  #    - For percentile: 50.0 to 99.0 (Higher = fewer, larger chunks; Lower = more granular chunks).
+  #    - For standard_deviation / interquartile: 0.5 to 2.5 multiplier (k).
+  #    - For fixed: 0.1 to 0.8 distance threshold.
+  semantic_threshold_amount: 90.0
+
+  # 3. semantic_buffer_size: Number of neighboring sentences combined before and after each sentence
+  #    when creating the contextual embedding window (smooths single-sentence noise).
+  semantic_buffer_size: 1
+
+  # 4. semantic_min_chunk_size: Minimum characters required per chunk; merges tiny fragments.
+  semantic_min_chunk_size: 50
+
+  # 5. semantic_max_chunk_size: Hard ceiling in characters; splits oversized sections via recursive fallback.
+  semantic_max_chunk_size: 2000
 
 crawler:
   allowed_domain_pattern: "${CRAWLER_ALLOWED_DOMAIN_PATTERN:}"

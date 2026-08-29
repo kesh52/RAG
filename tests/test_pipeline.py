@@ -203,3 +203,95 @@ def test_rag_pipeline_source_link_priority():
     # Assert that image_url and pdf_url were collected instead of page_url
     assert res["sources"] == ["file_url_img.png", "file_url_doc.pdf"]
     assert res["response"] == "Mock response\n\nSources:\n- file_url_img.png\n- file_url_doc.pdf"
+
+
+def test_rag_pipeline_multimodal_file_attachment():
+    """Verify that retrieve_and_generate properly passes attached file parts to Gemini for remediation workflows."""
+    mock_emb_service = MagicMock()
+    mock_emb_service.get_dense_embedding.return_value = [0.5] * 768
+
+    mock_retriever = MagicMock()
+    mock_retriever.hybrid_search_rrf.return_value = [
+        {"content": "Internal Runbook: Fix Cloud SQL SSL errors", "metadata": {"source_url": "https://wiki/runbook-sql"}}
+    ]
+
+    mock_reranker = MagicMock()
+    mock_reranker.rank_candidates.return_value = [
+        {"content": "Internal Runbook: Fix Cloud SQL SSL errors", "metadata": {"source_url": "https://wiki/runbook-sql"}}
+    ]
+
+    mock_gen_res = MagicMock()
+    mock_gen_res.text = "1. Diagnosis: SSL certificate failure.\n2. Remediation Plan: Update TLS certs."
+    mock_gen_client = MagicMock()
+    mock_gen_client.models.generate_content.return_value = mock_gen_res
+
+    pipeline = RAGPipeline(
+        embedding_service=mock_emb_service,
+        retriever=mock_retriever,
+        reranker=mock_reranker,
+        generator_client=mock_gen_client,
+        generator_model="gemini-2.5-flash"
+    )
+
+    pdf_mock_bytes = b"%PDF-1.4 mock audit report"
+    res = pipeline.retrieve_and_generate(
+        query="How to remediate findings in this report?",
+        use_hybrid=True,
+        use_reranker=True,
+        attached_file_bytes=pdf_mock_bytes,
+        attached_filename="security_audit_report.pdf",
+    )
+
+    assert "1. Diagnosis" in res["response"]
+    assert res["attached_filename"] == "security_audit_report.pdf"
+    assert res["sources"] == ["https://wiki/runbook-sql"]
+
+    # Verify generate_content received multimodal contents list with Part
+    mock_gen_client.models.generate_content.assert_called_once()
+    call_args = mock_gen_client.models.generate_content.call_args[1]
+    assert isinstance(call_args["contents"], list)
+    assert len(call_args["contents"]) == 2
+
+
+def test_rag_pipeline_documentation_gaps_extraction():
+    """Verify that documentation gaps are silently extracted from the generated response."""
+    mock_emb_service = MagicMock()
+    mock_emb_service.get_dense_embedding.return_value = [0.1] * 768
+
+    mock_retriever = MagicMock()
+    mock_retriever.vector_search.return_value = [
+        {"content": "Standard SOP for Redis.", "metadata": {"source_url": "https://wiki/redis"}}
+    ]
+
+    mock_gen_res = MagicMock()
+    mock_gen_res.text = """### 1. 📌 Diagnosis
+Redis cluster memory high.
+
+### 2. 📚 Internal Runbook Guidance
+Increase maxmemory policy to volatile-lru.
+
+<!-- DOCUMENTATION_GAPS -->
+Missing internal runbook for Redis Sentinel automated failover procedures.
+<!-- END_DOCUMENTATION_GAPS -->"""
+
+    mock_gen_client = MagicMock()
+    mock_gen_client.models.generate_content.return_value = mock_gen_res
+
+    pipeline = RAGPipeline(
+        embedding_service=mock_emb_service,
+        retriever=mock_retriever,
+        reranker=MagicMock(),
+        generator_client=mock_gen_client,
+        generator_model="gemini-2.5-flash"
+    )
+
+    res = pipeline.retrieve_and_generate("How to configure Redis failover?", use_hybrid=False, use_reranker=False)
+
+    # Verify that the user-facing response does NOT contain the gaps tag
+    assert "<!-- DOCUMENTATION_GAPS -->" not in res["response"]
+    assert "Missing internal runbook for Redis Sentinel" not in res["response"]
+    # Verify that the gap was silently extracted into the documentation_gaps key
+    assert res["documentation_gaps"] == "Missing internal runbook for Redis Sentinel automated failover procedures."
+    assert "### 1. 📌 Diagnosis" in res["response"]
+
+

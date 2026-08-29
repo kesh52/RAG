@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.config import config
 from src.etl.confluence import APIConfluenceClient
-from src.etl.chunking import RecursiveTextChunker
+from src.etl.chunking import get_chunker
 from src.embeddings.vertex import VertexEmbeddingService
 from src.etl.pipeline import ConfluenceETLPipeline
 
@@ -22,6 +22,14 @@ def main():
     parser = argparse.ArgumentParser(description="Run the Confluence ETL pipeline on a live page ID or URL.")
     parser.add_argument("root_page_id", type=str, help="The Confluence page ID or URL to start crawling from.")
     parser.add_argument("--max-depth", type=int, default=1, help="BFS crawl depth limit (default: 1).")
+    parser.add_argument(
+        "--strategy",
+        "-s",
+        type=str,
+        default=config.get("pipeline.chunking_strategy", "recursive"),
+        choices=["recursive", "semantic"],
+        help="Chunking strategy to use: 'recursive' or 'semantic' (default from config: %(default)s).",
+    )
     args = parser.parse_args()
 
     # Load credentials
@@ -41,16 +49,15 @@ def main():
     # 1. Initialize Confluence Client
     client = APIConfluenceClient(domain=domain, username=username, api_token=api_token)
     
-    # 2. Initialize Chunker
-    chunk_size = config.get("pipeline.chunk_size", 500)
-    chunk_overlap = config.get("pipeline.chunk_overlap", 50)
-    chunker = RecursiveTextChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    
-    # 3. Initialize Vertex AI client for multimodal embeddings/transcriptions
+    # 2. Initialize Vertex AI client for multimodal embeddings/transcriptions
     gcp_project = config.get("gcp.project")
     gcp_location = config.get("gcp.location")
     ai_client = genai.Client(vertexai=True, project=gcp_project, location=gcp_location)
     embedding_service = VertexEmbeddingService(client=ai_client, model_name=config.get("models.embedding"))
+
+    # 3. Initialize Chunker based on chosen strategy
+    chunker = get_chunker(strategy=args.strategy, embedding_service=embedding_service)
+    logger.info(f"Using chunking strategy: '{args.strategy}' ({chunker.__class__.__name__})")
 
     # 4. Instantiate and execute pipeline
     pipeline = ConfluenceETLPipeline(

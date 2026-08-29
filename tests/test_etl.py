@@ -201,3 +201,33 @@ def test_confluence_etl_pipeline_multimodal_ingestion():
     assert mock_cursor.execute.call_count == 3
 
 
+def test_confluence_etl_pipeline_with_semantic_chunker():
+    """Verify that ConfluenceETLPipeline functions properly with SemanticChunker."""
+    from src.etl.chunking import SemanticChunker
+
+    client = MockConfluenceClient()
+    emb_service = MockEmbeddingService()
+    chunker = SemanticChunker(
+        embedding_service=emb_service,
+        min_chunk_size=10,
+        max_chunk_size=500,
+    )
+
+    mock_cursor = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+    mock_db_factory = MagicMock(return_value=mock_conn)
+
+    pipeline = ConfluenceETLPipeline(
+        confluence_client=client,
+        chunker=chunker,
+        embedding_service=emb_service,
+        db_conn_factory=mock_db_factory,
+    )
+
+    ingested_count = pipeline.run("root_page", max_depth=1)
+    assert ingested_count == 3
+    assert mock_cursor.execute.call_count == 3
+    assert mock_conn.commit.call_count == 1
+
+

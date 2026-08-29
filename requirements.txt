@@ -12,3 +12,8 @@ pyliquibase
 cloud-sql-python-connector[psycopg]
 pyyaml
 alembic
+streamlit
+scikit-learn
+fastapi
+uvicorn[standard]
+python-multipart

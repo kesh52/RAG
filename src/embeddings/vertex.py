@@ -24,3 +24,22 @@ class VertexEmbeddingService(BaseEmbeddingService):
         )
         return emb_res.embeddings[0].values
 
+    def get_dense_embeddings(self, texts: list[str]) -> list[list[float]]:
+        """Generates dense vector embeddings for a list of texts using Vertex AI."""
+        if not texts:
+            return []
+        logger.debug(f"Generating dense embeddings for {len(texts)} texts using model '{self.model_name}'")
+        try:
+            emb_res = self.client.models.embed_content(
+                model=self.model_name,
+                contents=texts,
+                config=genai_types.EmbedContentConfig(
+                    task_type="RETRIEVAL_QUERY",
+                    output_dimensionality=768,
+                ),
+            )
+            return [e.values for e in emb_res.embeddings]
+        except Exception as e:
+            logger.warning(f"Batch embedding failed ({e}), falling back to item-by-item: {e}")
+            return [self.get_dense_embedding(t) for t in texts]
+

@@ -1,0 +1,282 @@
+<p><strong>System Name:</strong> Modular Multi-Stage RAG Platform<br />
+<strong>Document Version:</strong> 1.0.0<br />
+<strong>Target Environment:</strong> Google Cloud Platform (Cloud Run, Cloud SQL PostgreSQL 16 + pgvector, Vertex AI)<br />
+<strong>Status:</strong> Implemented / Reverse-Engineered from Source Code</p>
+
+<ac:structured-macro ac:name="info">
+  <ac:parameter ac:name="title">Architecture Specification Overview</ac:parameter>
+  <ac:rich-text-body>
+    <p>This technical specification documents the reverse-engineered requirements, data contracts, and component architectures of the production Python RAG pipeline.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h2>1. Configuration &amp; Infrastructure Core</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>The Configuration &amp; Logging Core provides centralized, environment-aware configuration management and standardized rotating diagnostics across all pipeline subsystems. Its boundary covers loading dynamic settings from <code>config.yaml</code>, resolving runtime environment variables with fallback defaults, and initializing structured logging sinks.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-CFG-01</code> Dynamic Variable Interpolation:</strong> Parses YAML configuration files with nested <code>${VAR_NAME:default_value}</code> syntax, resolving sensitive credentials and environment-specific endpoints dynamically at runtime.</li>
+  <li><strong><code>FR-CFG-02</code> Dot-Notation Configuration Access:</strong> Exposes a singleton <code>Config</code> class with hierarchical dot-separated key traversal (e.g. <code>config.get("database.host", "127.0.0.1")</code>).</li>
+  <li><strong><code>FR-LOG-01</code> Dual-Sink Rotating Logging:</strong> Configures synchronous console logging and a size-managed <code>RotatingFileHandler</code> with automated log directory creation.</li>
+</ul>
+
+<h3>Technical &amp; Non-Functional Decisions (NFR)</h3>
+<ul>
+  <li><strong>Libraries:</strong> <code>pyyaml</code>, <code>python-dotenv</code>, <code>logging.handlers.RotatingFileHandler</code>.</li>
+  <li><strong>Log Rotation Policy:</strong> 5 MB maximum file size (<code>maxBytes=5*1024*1024</code>), retaining up to 3 backup archives (<code>backupCount=3</code>) with UTF-8 encoding.</li>
+  <li><strong>Log Format:</strong> <code>%(asctime)s [%(levelname)s] %(name)s: %(message)s</code>.</li>
+</ul>
+
+<hr />
+
+<h2>2. Ingestion, Crawling &amp; Chunking Engine (ETL)</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>The ETL component extracts unstructured XHTML data and attachments from Atlassian Confluence, normalizes and cleans document structure, splits content into retrieval-optimized chunks, and transcribes visual/document assets. The boundary starts at the Confluence REST API and ends with chunked text structures passed to the embedding service.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-ETL-01</code> Confluence REST Extraction &amp; HTML Sanitization:</strong> Fetches Confluence storage format XHTML via <code>APIConfluenceClient</code> and extracts structured text, inline links, image sources, and PDF attachment URLs using <code>ConfluenceHTMLParser</code>.</li>
+  <li><strong><code>FR-ETL-02</code> Breadth-First Search (BFS) Recursive Crawling:</strong> Traverses page link graphs up to a configurable <code>max_depth</code> with cycle detection and domain restriction regex filtering (<code>RecursiveCrawler</code>).</li>
+  <li><strong><code>FR-ETL-03</code> Recursive Delimiter Chunking:</strong> Slices text hierarchically through delimiters (<code>\n\n</code> &rarr; <code>\n</code> &rarr; <code>' '</code> &rarr; <code>""</code>) with character overlap sliding windows (<code>RecursiveTextChunker</code>).</li>
+  <li><strong><code>FR-ETL-04</code> Semantic Boundary Chunking:</strong> Segments text at sentence boundaries using statistical cosine distance shifts between adjacent sentence embedding windows (<code>SemanticChunker</code>).</li>
+  <li><strong><code>FR-ETL-05</code> Multimodal Asset Processing:</strong> Transcribes <code>.png</code>/<code>.jpg</code>/<code>.bmp</code> diagrams into text descriptions and <code>.pdf</code> manuals into Markdown tables and content using <code>gemini-2.5-flash</code> before vectorization.</li>
+  <li><strong><code>FR-ETL-06</code> Asset Storage Routing:</strong> Saves downloaded binary assets to local disk (<code>assets/uploaded/</code>) or Google Cloud Storage (<code>google-cloud-storage</code>) based on <code>crawler.asset_storage_type</code>.</li>
+</ul>
+
+<h3>Technical &amp; Non-Functional Decisions (NFR)</h3>
+<ul>
+  <li><strong>Libraries:</strong> <code>requests</code>, <code>html.parser</code>, <code>re</code>, <code>numpy</code>, <code>google-genai</code>, <code>google-cloud-storage</code>.</li>
+  <li><strong>Recursive Chunking Constraints:</strong> Default <code>chunk_size = 500</code> characters, <code>chunk_overlap = 50</code> characters.</li>
+  <li><strong>Semantic Chunking Statistical Cutoffs:</strong> Supports <code>percentile</code> (default 90.0), <code>standard_deviation</code>, <code>interquartile</code>, <code>gradient</code>, and <code>fixed</code> distance thresholds.</li>
+  <li><strong>Semantic Size Guarantees:</strong> Context buffering window (<code>buffer_size = 1</code>), minimum chunk merging threshold (<code>min_chunk_size = 50</code>), maximum chunk ceiling (<code>max_chunk_size = 2000</code>) with recursive fallback splitting.</li>
+</ul>
+
+<hr />
+
+<h2>3. Embedding Generation &amp; Vector Storage</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>This component transforms raw textual chunks into dense vector representations and persists them alongside structured JSON metadata and full-text search tokens in a relational vector database. Its boundary spans the Vertex AI embedding model interface, database connection management, schema migrations, and index definitions.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-VEC-01</code> Dense Vector Embedding Generation:</strong> Vectorizes strings using Vertex AI <code>text-embedding-005</code> with 768 output dimensions and <code>RETRIEVAL_QUERY</code>/<code>RETRIEVAL_DOCUMENT</code> task types (<code>VertexEmbeddingService</code>).</li>
+  <li><strong><code>FR-VEC-02</code> Hybrid Document Schema with Auto-Generated FTS:</strong> Maintains the <code>documents</code> table with generated English <code>tsvector</code> columns and JSONB metadata.</li>
+  <li><strong><code>FR-VEC-03</code> Dual Connection Engine (Cloud SQL &amp; Direct Socket):</strong> Establishes database connectivity via <code>google-cloud-sql-connector</code> with IAM service account impersonation (<code>public</code>, <code>private</code>, or <code>psc</code> IP modes) or falls back to direct TCP socket connection via <code>psycopg</code> (<code>get_connection</code>).</li>
+  <li><strong><code>FR-VEC-04</code> Schema Versioning &amp; Automated Repair:</strong> Executes migration lifecycles via Alembic scripts and provides programmatic self-healing for missing tables/columns (<code>run_migrations.py</code>).</li>
+</ul>
+
+<h3>Technical &amp; Non-Functional Decisions (NFR)</h3>
+<ul>
+  <li><strong>Libraries:</strong> <code>psycopg</code> (v3), <code>pgvector</code>, <code>google-cloud-sql-connector</code>, <code>alembic</code>, <code>google-genai</code>.</li>
+  <li><strong>Database Engine:</strong> PostgreSQL 16+ with <code>vector</code> extension.</li>
+  <li><strong>Index Definitions:</strong>
+    <ul>
+      <li>Dense Vector: HNSW index on <code>embedding</code> using <code>vector_cosine_ops</code> (<code>idx_documents_embedding_hnsw</code>).</li>
+      <li>Sparse Keyword: GIN index on stored generated column <code>text_search_tsv</code> (<code>idx_documents_fts</code>).</li>
+    </ul>
+  </li>
+  <li><strong>Vector Dimensionality:</strong> 768 float values.</li>
+</ul>
+
+<h3>Database Schema: <code>documents</code></h3>
+<table>
+  <thead>
+    <tr>
+      <th>Column</th>
+      <th>Type</th>
+      <th>Constraints</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>id</code></td>
+      <td><code>BIGSERIAL</code></td>
+      <td><code>PRIMARY KEY</code></td>
+      <td>Unique chunk record identifier</td>
+    </tr>
+    <tr>
+      <td><code>content</code></td>
+      <td><code>TEXT</code></td>
+      <td><code>NOT NULL</code></td>
+      <td>Text body of chunk</td>
+    </tr>
+    <tr>
+      <td><code>metadata</code></td>
+      <td><code>JSONB</code></td>
+      <td></td>
+      <td>Source URL, chunk index, asset type (<code>confluence_scraped</code>, <code>confluence_image</code>, <code>confluence_pdf_page</code>)</td>
+    </tr>
+    <tr>
+      <td><code>embedding</code></td>
+      <td><code>vector(768)</code></td>
+      <td></td>
+      <td>Dense cosine embedding vector</td>
+    </tr>
+    <tr>
+      <td><code>text_search_tsv</code></td>
+      <td><code>tsvector</code></td>
+      <td><code>GENERATED ALWAYS AS (to_tsvector('english', COALESCE(content, ''))) STORED</code></td>
+      <td>Stored tokenized document vector for BM25 full-text search</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2>4. Retrieval &amp; Reranking Engine</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>The Retrieval &amp; Reranking component handles candidate discovery from the PostgreSQL database and applies cross-encoder reranking to score semantic relevance. Its boundary covers single-stage dense search, two-stage hybrid Reciprocal Rank Fusion (RRF), and Vertex AI Discovery Engine cross-encoder reranking.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-RET-01</code> Pure Dense Vector Retrieval:</strong> Queries pgvector using cosine distance operator <code>&lt;=&gt;</code> ordered ascending up to candidate pool limit (<code>vector_search</code>).</li>
+  <li><strong><code>FR-RET-02</code> Hybrid Search with Reciprocal Rank Fusion (RRF):</strong> Executes unified SQL combining Dense HNSW ranking and Sparse <code>ts_rank_cd</code> full-text search using <code>FULL OUTER JOIN</code> with RRF scoring formula: <code>RRF_Score = 1.0/(60 + dense_rank) + 1.0/(60 + sparse_rank)</code>.</li>
+  <li><strong><code>FR-RET-03</code> Stage-2 Cross-Encoder Semantic Reranking:</strong> Sends top candidate chunks along with the query to Vertex AI Semantic Ranker (<code>semantic-ranker-512@latest</code>) to eliminate false positives and produce final top-K contexts (<code>VertexReranker</code>).</li>
+</ul>
+
+<h3>Technical &amp; Non-Functional Decisions (NFR)</h3>
+<ul>
+  <li><strong>Libraries:</strong> <code>psycopg</code>, <code>google-cloud-discoveryengine</code> (<code>discoveryengine_v1.RankServiceClient</code>).</li>
+  <li><strong>Retrieval Defaults:</strong> <code>pool_size = 5</code> (Stage 1), <code>final_top_k = 2</code> (Stage 2), <code>rrf_k = 60</code>.</li>
+  <li><strong>Reranker Model:</strong> <code>semantic-ranker-512@latest</code> executed against <code>default_ranking_config</code>.</li>
+</ul>
+
+<hr />
+
+<h2>5. Synthesis &amp; Pipeline Orchestration (Generation &amp; Remediation)</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>The Orchestration component coordinates end-to-end query processing: augmenting input queries with report snippets/attachments, executing retrieval and reranking stages, formatting dual-track grounded prompts, calling the generative LLM, and parsing hidden documentation gaps.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-SYN-01</code> Dynamic Retrieval &amp; Reranking Orchestration:</strong> Orchestrates the full query lifecycle with feature toggles (<code>use_hybrid</code>, <code>use_reranker</code>, <code>pool_size</code>, <code>final_top_k</code>) (<code>RAGPipeline.retrieve_and_generate</code>).</li>
+  <li><strong><code>FR-SYN-02</code> Multimodal Document Query Augmentation:</strong> Accepts raw bytes of uploaded diagnostic files (<code>.pdf</code>, <code>.png</code>, <code>.jpg</code>, <code>.txt</code>, <code>.log</code>), prepending plain text snippets (first 600 characters) to retrieval queries to optimize vector search.</li>
+  <li><strong><code>FR-SYN-03</code> Dual-Track Knowledge Attribution Prompting:</strong> Constructs structured prompts strictly segregating Internal Documentation Guidance (grounded with <code>[Source: URL]</code>) from General Industry Best Practices and Verification steps.</li>
+  <li><strong><code>FR-SYN-04</code> Silent Internal Documentation Gap Extraction:</strong> Prompts the model to identify missing runbooks inside delimited comment tags (<code>&lt;!-- DOCUMENTATION_GAPS --&gt;</code>), parses and strips them from user-facing output, and stores them in metadata.</li>
+  <li><strong><code>FR-SYN-05</code> Deduplicated Source Footer Generation:</strong> Aggregates unique cited source URLs (prioritizing direct image/PDF links over parent Confluence page URLs) and appends a formatted reference list to the answer.</li>
+</ul>
+
+<hr />
+
+<h2>6. Continuous Feedback, Triage &amp; Annotation Store</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>This component captures operational query telemetry, end-user ratings, root-cause failure taxonomy tags, corrected reference answers, and uploaded binary report files. It provides persistence in PostgreSQL and enables promotion of validated interactions into versioned JSON benchmark datasets.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-FB-01</code> Feedback &amp; Telemetry Persistence:</strong> Records user ratings (1 for Negative, 5 for Positive), latency (ms), model configurations, retrieved chunks, issue tags, uploaded files, and parsed knowledge gaps in table <code>query_feedback</code> (<code>save_feedback</code>).</li>
+  <li><strong><code>FR-FB-02</code> Binary File Storage &amp; Lazy Retrieval:</strong> Persists attached incident reports as binary <code>BYTEA</code> data in PostgreSQL, exposing a dedicated lazy loader (<code>get_feedback_attachment</code>).</li>
+  <li><strong><code>FR-FB-03</code> Failure Taxonomy Aggregation:</strong> Aggregates satisfaction rates, latency distributions, and root-cause failure tag distributions (<code>jsonb_array_elements_text</code>) via SQL (<code>get_feedback_analytics</code>).</li>
+  <li><strong><code>FR-FB-04</code> Ground-Truth Correction &amp; Benchmark Dataset Promotion:</strong> Allows domain experts to write ideal reference answers, update database records, and append/update cases in <code>evaluation/datasets/{dataset_name}.json</code> (<code>promote_to_benchmark</code>).</li>
+</ul>
+
+<h3>Database Table Schema: <code>query_feedback</code></h3>
+<table>
+  <thead>
+    <tr>
+      <th>Column</th>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td><code>id</code></td><td><code>BIGSERIAL PRIMARY KEY</code></td><td>Unique feedback identifier</td></tr>
+    <tr><td><code>created_at</code></td><td><code>TIMESTAMPTZ DEFAULT NOW()</code></td><td>Execution timestamp</td></tr>
+    <tr><td><code>query</code></td><td><code>TEXT NOT NULL</code></td><td>Input user query</td></tr>
+    <tr><td><code>response</code></td><td><code>TEXT NOT NULL</code></td><td>Generated response text</td></tr>
+    <tr><td><code>retrieved_contexts</code></td><td><code>JSONB NOT NULL</code></td><td>Array of retrieved chunk texts</td></tr>
+    <tr><td><code>sources</code></td><td><code>JSONB NOT NULL</code></td><td>Array of cited URLs</td></tr>
+    <tr><td><code>use_hybrid</code> / <code>use_reranker</code></td><td><code>BOOLEAN NOT NULL</code></td><td>Pipeline execution toggles</td></tr>
+    <tr><td><code>pool_size</code> / <code>final_top_k</code></td><td><code>INTEGER NOT NULL</code></td><td>Parameter settings</td></tr>
+    <tr><td><code>generation_model</code></td><td><code>TEXT NOT NULL</code></td><td>Model name identifier</td></tr>
+    <tr><td><code>latency_ms</code></td><td><code>INTEGER</code></td><td>End-to-end execution duration</td></tr>
+    <tr><td><code>rating</code></td><td><code>INTEGER NOT NULL</code></td><td>Rating value (5 = 👍 Good, 1 = 👎 Bad)</td></tr>
+    <tr><td><code>issue_tags</code></td><td><code>JSONB DEFAULT '[]'::jsonb</code></td><td>Taxonomy tags</td></tr>
+    <tr><td><code>corrected_reference</code></td><td><code>TEXT</code></td><td>Human-curated ground-truth answer</td></tr>
+    <tr><td><code>user_comment</code></td><td><code>TEXT</code></td><td>Optional notes</td></tr>
+    <tr><td><code>is_promoted_to_benchmark</code></td><td><code>BOOLEAN DEFAULT FALSE</code></td><td>Export status</td></tr>
+    <tr><td><code>attached_filename</code></td><td><code>TEXT</code></td><td>Uploaded document filename</td></tr>
+    <tr><td><code>attached_file_data</code></td><td><code>BYTEA</code></td><td>Raw binary bytes of uploaded report</td></tr>
+    <tr><td><code>attached_file_mime</code></td><td><code>TEXT</code></td><td>Document MIME type</td></tr>
+    <tr><td><code>documentation_gaps</code></td><td><code>TEXT</code></td><td>Extracted internal documentation gaps</td></tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2>7. Evaluation &amp; Quality Assurance (Ragas Benchmark)</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>The Evaluation component automates regression testing and metric scoring of RAG pipeline variations against curated benchmark datasets. Its boundary covers batch query execution, Ragas metric computation via Vertex AI judge models, aggregated KPI calculation, and historical run persistence.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-EVL-01</code> Automated Ragas Metric Evaluation:</strong> Measures four standard RAG metrics: <code>faithfulness</code>, <code>answer_relevancy</code>, <code>context_precision</code>, and <code>context_recall</code>.</li>
+  <li><strong><code>FR-EVL-02</code> Vertex AI LLM &amp; Embedding Judge Wrappers:</strong> Wraps <code>ChatVertexAI(model_name="gemini-2.5-flash")</code> and <code>VertexAIEmbeddings(model_name="text-embedding-005")</code> with LangChain and Ragas wrapper abstractions.</li>
+  <li><strong><code>FR-EVL-03</code> Dataset Discovery &amp; Loading:</strong> Automatically discovers and parses JSON benchmark files from <code>evaluation/datasets/</code>.</li>
+  <li><strong><code>FR-EVL-04</code> Evaluation History Persistence &amp; Comparison:</strong> Stores full run parameters, aggregated averages, and per-question score breakdowns in table <code>evaluation_runs</code> (<code>save_evaluation_run</code>).</li>
+</ul>
+
+<hr />
+
+<h2>8. User Interface &amp; Administrative Dashboard</h2>
+<h3>Responsibilities &amp; Scope</h3>
+<p>The UI component provides an interactive Streamlit-based web control plane for managing ETL operations, visually debugging chunking strategies, exploring database tables, executing Ragas evaluations, and testing the live RAG playground. Its boundary is defined by <code>admin_app.py</code> and modular sub-tabs in <code>src/ui/tabs/</code>.</p>
+
+<h3>Implemented Functional Requirements (FR)</h3>
+<ul>
+  <li><strong><code>FR-UI-01</code> Interactive Chunking Playground &amp; Transition Visualizer:</strong> Slices sample or pasted Confluence text with real-time parameter tuning, rendering side-by-side Recursive vs. Semantic comparisons and sentence-to-sentence cosine distance line charts.</li>
+  <li><strong><code>FR-UI-02</code> Database Table Inspector &amp; Vector Dimensionality Reduction:</strong> Browses any database table with dynamic column selection, text search, and 2D vector space scatter plots using PCA or t-SNE.</li>
+  <li><strong><code>FR-UI-03</code> Interactive Evaluation Dashboard &amp; Run Diff Engine:</strong> Triggers Ragas benchmark runs with live progress feedback, metric quality icons (&para;), and side-by-side run delta comparisons.</li>
+  <li><strong><code>FR-UI-04</code> Playground with Embedded In-Browser Document Previews:</strong> Supports diagnostic file uploads (<code>.pdf</code>, <code>.png</code>, <code>.jpg</code>, <code>.txt</code>, <code>.log</code>), renders in-browser Base64 PDF iframes and image viewers, captures feedback ratings and root-cause tags, and promotes corrected answers directly to JSON benchmarks.</li>
+</ul>
+
+<hr />
+
+<h2>9. Technical Debt &amp; Implementation Gaps</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Area</th>
+      <th>Current Implementation</th>
+      <th>Limitation / Technical Debt</th>
+      <th>Recommended Remediation</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Connection Pooling</strong></td>
+      <td><code>get_connection()</code> creates raw single connections.</td>
+      <td>Connection overhead and potential Cloud SQL connection exhaustion.</td>
+      <td>Implement <code>psycopg_pool.ConnectionPool</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>Embedding Task Types</strong></td>
+      <td><code>VertexEmbeddingService</code> hardcodes <code>task_type="RETRIEVAL_QUERY"</code>.</td>
+      <td>Ingested chunks benefit from <code>RETRIEVAL_DOCUMENT</code> for asymmetric cosine similarity.</td>
+      <td>Add dynamic <code>task_type</code> parameter to embedding calls.</td>
+    </tr>
+    <tr>
+      <td><strong>Asynchronous I/O</strong></td>
+      <td>Synchronous HTTP requests and Gemini calls.</td>
+      <td>Sequential crawling of large spaces blocks threads.</td>
+      <td>Migrate to <code>asyncio</code> + <code>httpx</code>/<code>aiohttp</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>Streaming Generation</strong></td>
+      <td>Synchronous complete generation wait.</td>
+      <td>Higher time-to-first-token perceived latency in UI.</td>
+      <td>Implement <code>generate_content_stream</code> + <code>st.write_stream</code>.</td>
+    </tr>
+    <tr>
+      <td><strong>Confluence Auth</strong></td>
+      <td>Basic HTTP Authentication only.</td>
+      <td>Incompatible with OAuth 2.0 / Atlassian Connect apps.</td>
+      <td>Add OAuth 2.0 Bearer token support.</td>
+    </tr>
+  </tbody>
+</table>
+

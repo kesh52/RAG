@@ -35,7 +35,11 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
 │   │   └── vertex.py            # Vertex Semantic Ranker implementation
 │   ├── pipeline/                # Orchestrator package
 │   │   └── orchestrator.py      # RAG Pipeline orchestrator
+│   ├── feedback/                # Playground & user feedback store
+│   │   ├── README.md            # Interactive playground & continuous feedback documentation
+│   │   └── feedback_store.py    # PostgreSQL persistence, analytics & dataset promotion
 │   └── etl/                     # ETL crawler package
+│       ├── README.md            # ETL architecture & continuous feedback loop documentation
 │       ├── confluence.py        # Confluence scrapers and BFS crawlers
 │       ├── chunking.py          # Sliding-window text chunker
 │       └── pipeline.py          # ETL orchestrator
@@ -126,4 +130,15 @@ This repository contains a modular RAG (Retrieval-Augmented Generation) pipeline
     ```bash
     python3 -m pytest
     ```
+
+9.  **Interactive Admin Dashboard & Continuous Feedback Loop**:
+    Launch the Streamlit management dashboard featuring ETL crawler triggers, pgvector database explorer, Ragas evaluation runner, and the interactive remediation playground:
+    ```bash
+    python3 -m streamlit run admin_app.py
+    ```
+
+    - **Multimodal Remediation & Feedback**: Drag and drop incident report PDFs, analyze issues, rate answers, and triage failures into regression benchmark datasets.
+    - Detailed documentation: See [src/feedback/README.md](file:///Users/ilja/DEV/AI/src/feedback/README.md).
+    - ETL crawler architecture: See [src/etl/README.md](file:///Users/ilja/DEV/AI/src/etl/README.md).
+
 

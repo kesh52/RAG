@@ -1,4 +1,6 @@
 import sys
+import os
+import json
 import types
 from langchain_google_vertexai import ChatVertexAI
 
@@ -20,8 +22,11 @@ from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from src.pipeline import get_default_pipeline, RAGPipeline
 
-# --- Benchmark Cases ---
-benchmark_cases = [
+# Directory containing benchmark dataset JSON files
+DATASETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "datasets")
+
+# --- Default Benchmark Cases (kept for backward compatibility) ---
+DEFAULT_BENCHMARK_CASES = [
     {
         "query": "How does Spring Batch manage chunk-based processing?",
         "reference": "Spring Batch processes data in chunks where an ItemReader reads items, an ItemProcessor transforms them, and an ItemWriter writes them in configurable batch sizes within a transaction."
@@ -48,7 +53,63 @@ benchmark_cases = [
     }
 ]
 
-def run_pipeline_evaluation(pipeline: RAGPipeline, use_hybrid: bool, use_reranker: bool, label: str):
+
+def list_available_datasets() -> list[str]:
+    """Return names of available benchmark dataset files (without .json extension)."""
+    if not os.path.isdir(DATASETS_DIR):
+        return []
+    return sorted(
+        os.path.splitext(f)[0]
+        for f in os.listdir(DATASETS_DIR)
+        if f.endswith(".json")
+    )
+
+
+def load_dataset(name: str) -> list[dict]:
+    """Load benchmark cases from a named dataset JSON file.
+
+    Falls back to the built-in default cases if the file is not found.
+    """
+    filepath = os.path.join(DATASETS_DIR, f"{name}.json")
+    if os.path.isfile(filepath):
+        with open(filepath, "r") as f:
+            return json.load(f)
+    if name == "default":
+        return DEFAULT_BENCHMARK_CASES
+    raise FileNotFoundError(f"Dataset '{name}' not found at {filepath}")
+
+
+def run_pipeline_evaluation(
+    pipeline: RAGPipeline,
+    use_hybrid: bool,
+    use_reranker: bool,
+    label: str,
+    benchmark_cases: list[dict] | None = None,
+    pool_size: int = 5,
+    final_top_k: int = 2,
+    progress_callback=None,
+):
+    """Run evaluation and return structured results.
+
+    Args:
+        pipeline: The RAGPipeline instance to evaluate.
+        use_hybrid: Whether to enable hybrid search.
+        use_reranker: Whether to enable semantic reranking.
+        label: Human-readable label for this evaluation run.
+        benchmark_cases: List of query/reference dicts. Defaults to DEFAULT_BENCHMARK_CASES.
+        pool_size: Number of Stage 1 candidates to retrieve.
+        final_top_k: Number of final context chunks for the LLM.
+        progress_callback: Optional callable(current, total, message) for progress updates.
+
+    Returns:
+        dict with keys:
+            - "label": the run label
+            - "dataframe": pandas DataFrame with per-question metrics
+            - "aggregated": dict of averaged metric values
+    """
+    if benchmark_cases is None:
+        benchmark_cases = DEFAULT_BENCHMARK_CASES
+
     print(f"\n==================================================")
     print(f"Running Evaluation for: {label}")
     print(f"==================================================")
@@ -60,14 +121,19 @@ def run_pipeline_evaluation(pipeline: RAGPipeline, use_hybrid: bool, use_reranke
         "reference": [],
     }
 
-    for item in benchmark_cases:
-        print(f"Querying pipeline for: '{item['query']}'...")
+    total = len(benchmark_cases)
+    for i, item in enumerate(benchmark_cases):
+        msg = f"Querying pipeline for: '{item['query']}'..."
+        print(msg)
+        if progress_callback:
+            progress_callback(i, total, msg)
+
         pipeline_output = pipeline.retrieve_and_generate(
             query=item["query"],
             use_hybrid=use_hybrid,
             use_reranker=use_reranker,
-            pool_size=5,
-            final_top_k=2
+            pool_size=pool_size,
+            final_top_k=final_top_k,
         )
 
         eval_data["user_input"].append(pipeline_output["user_input"])
@@ -83,6 +149,9 @@ def run_pipeline_evaluation(pipeline: RAGPipeline, use_hybrid: bool, use_reranke
     judge_llm = LangchainLLMWrapper(raw_judge_llm)
     judge_embeddings = LangchainEmbeddingsWrapper(raw_judge_embeddings)
 
+    if progress_callback:
+        progress_callback(total, total, "Running Ragas evaluation...")
+
     print(f"Evaluating {label} with Ragas...")
     results = evaluate(
         dataset=eval_dataset,
@@ -97,13 +166,28 @@ def run_pipeline_evaluation(pipeline: RAGPipeline, use_hybrid: bool, use_reranke
     )
 
     df = results.to_pandas()
-    return df
+
+    # Compute aggregated metrics
+    metric_cols = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
+    aggregated = {}
+    for col in metric_cols:
+        if col in df.columns:
+            aggregated[f"avg_{col}"] = float(df[col].mean())
+        else:
+            aggregated[f"avg_{col}"] = None
+
+    return {
+        "label": label,
+        "dataframe": df,
+        "aggregated": aggregated,
+    }
+
 
 def main():
     pipeline = get_default_pipeline()
 
     # 1. Evaluate baseline pipeline
-    df_baseline = run_pipeline_evaluation(
+    result_baseline = run_pipeline_evaluation(
         pipeline=pipeline,
         use_hybrid=False,
         use_reranker=False,
@@ -111,7 +195,7 @@ def main():
     )
 
     # 2. Evaluate advanced pipeline
-    df_advanced = run_pipeline_evaluation(
+    result_advanced = run_pipeline_evaluation(
         pipeline=pipeline,
         use_hybrid=True,
         use_reranker=True,
@@ -122,14 +206,13 @@ def main():
     print("\n\n==================================================")
     print("COMPARATIVE EVALUATION SUMMARY")
     print("==================================================")
-    
+
     cols = ["user_input", "faithfulness", "answer_relevancy", "context_precision", "context_recall"]
     print("\n--- BASELINE PIPELINE ---")
-    print(df_baseline[cols].to_string(index=False))
-    
+    print(result_baseline["dataframe"][cols].to_string(index=False))
+
     print("\n--- ADVANCED PIPELINE ---")
-    print(df_advanced[cols].to_string(index=False))
+    print(result_advanced["dataframe"][cols].to_string(index=False))
 
 if __name__ == "__main__":
     main()
-
