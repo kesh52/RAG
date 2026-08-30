@@ -113,8 +113,16 @@ def get_all_settings() -> dict[str, Any]:
         return {}
 
 
+def clear_settings_cache() -> None:
+    """Clear the in-memory settings cache."""
+    global _CACHE, _CACHE_TIMESTAMP
+    _CACHE.clear()
+    _CACHE_TIMESTAMP = 0.0
+
+
 def set_setting(key: str, value: Any, updated_by: str = "admin") -> bool:
     """Insert or update a setting value in PostgreSQL."""
+    global _CACHE, _CACHE_TIMESTAMP
     init_settings_table()
     try:
         val_json = json.dumps(value)
@@ -132,6 +140,8 @@ def set_setting(key: str, value: Any, updated_by: str = "admin") -> bool:
                     (key, val_json, updated_by),
                 )
             conn.commit()
+            _CACHE[key] = value
+            _CACHE_TIMESTAMP = time.time()
             logger.info(f"Updated system setting '{key}' in database.")
             return True
     except Exception as e:
@@ -141,6 +151,7 @@ def set_setting(key: str, value: Any, updated_by: str = "admin") -> bool:
 
 def set_many_settings(settings_dict: dict[str, Any], updated_by: str = "admin") -> bool:
     """Save multiple settings in a single transaction."""
+    global _CACHE, _CACHE_TIMESTAMP
     init_settings_table()
     try:
         with closing(get_connection()) as conn:
@@ -159,6 +170,8 @@ def set_many_settings(settings_dict: dict[str, Any], updated_by: str = "admin") 
                         (k, val_json, updated_by),
                     )
             conn.commit()
+            _CACHE.update(settings_dict)
+            _CACHE_TIMESTAMP = time.time()
             logger.info(f"Updated {len(settings_dict)} system settings.")
             return True
     except Exception as e:
@@ -168,12 +181,15 @@ def set_many_settings(settings_dict: dict[str, Any], updated_by: str = "admin") 
 
 def delete_setting(key: str) -> bool:
     """Delete a setting override from PostgreSQL."""
+    global _CACHE, _CACHE_TIMESTAMP
     init_settings_table()
     try:
         with closing(get_connection()) as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM system_settings WHERE key = %s;", (key,))
             conn.commit()
+            _CACHE.pop(key, None)
+            _CACHE_TIMESTAMP = time.time()
             return True
     except Exception as e:
         logger.error(f"Failed to delete system setting '{key}': {e}")

@@ -38,3 +38,39 @@ def test_resolve_env_vars(monkeypatch):
     assert resolved["gcp"]["location"] == "europe-west3"
     assert resolved["database"]["port"] == 5432
 
+
+def test_settings_store_cache_and_dynamic_config():
+    """Verify settings_store in-memory caching, dynamic setting retrieval, and cache invalidation."""
+    from unittest.mock import MagicMock, patch
+    from src.db import settings_store
+    from src.utils.config import config
+
+    settings_store.clear_settings_cache()
+
+    with patch("src.db.settings_store.get_connection") as mock_get_conn:
+        mock_conn = MagicMock()
+        mock_cur = MagicMock()
+        mock_get_conn.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
+
+        # Test set_many_settings updates cache
+        settings_store.set_many_settings({
+            "pipeline.prompt_preset": "Strict Grounding Only",
+            "pipeline.prompt_template": "Strict Template Content",
+        })
+
+        # get_setting should return from cache immediately
+        val_preset = settings_store.get_setting("pipeline.prompt_preset")
+        assert val_preset == "Strict Grounding Only"
+
+        val_tpl = config.get_dynamic("pipeline.prompt_template")
+        assert val_tpl == "Strict Template Content"
+
+        # delete_setting updates cache
+        settings_store.delete_setting("pipeline.prompt_preset")
+        assert "pipeline.prompt_preset" not in settings_store._CACHE
+
+        # clear cache
+        settings_store.clear_settings_cache()
+        assert len(settings_store._CACHE) == 0
+

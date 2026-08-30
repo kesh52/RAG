@@ -9,6 +9,7 @@ from src.db.settings_store import (
     get_all_settings,
     set_many_settings,
     delete_setting,
+    clear_settings_cache,
 )
 from src.pipeline.prompts import (
     PROMPT_PRESETS,
@@ -66,125 +67,171 @@ def render_settings_tab():
     current_chunk_size = config.get_dynamic("pipeline.chunk_size", config.get("pipeline.chunk_size", 500))
     current_chunk_overlap = config.get_dynamic("pipeline.chunk_overlap", config.get("pipeline.chunk_overlap", 50))
 
-    # Form
-    with st.form("system_settings_form"):
-        # -------------------------------------------------------------------
-        # 1. Retrieval Strategy
-        # -------------------------------------------------------------------
-        st.subheader("1. 🔍 Default Retrieval Strategy")
-        c_ret1, c_ret2 = st.columns(2)
+    # -------------------------------------------------------------------
+    # 1. Retrieval Strategy
+    # -------------------------------------------------------------------
+    st.subheader("1. 🔍 Default Retrieval Strategy")
+    c_ret1, c_ret2 = st.columns(2)
 
-        with c_ret1:
-            cfg_hybrid = st.toggle("Enable Hybrid Search (pgvector + FTS via RRF)", value=bool(current_hybrid))
-            cfg_reranker = st.toggle("Enable Semantic Cross-Encoder Reranker (Vertex AI)", value=bool(current_reranker))
+    with c_ret1:
+        cfg_hybrid = st.toggle(
+            "Enable Hybrid Search (pgvector + FTS via RRF)",
+            value=bool(current_hybrid),
+        )
+        cfg_reranker = st.toggle(
+            "Enable Semantic Cross-Encoder Reranker (Vertex AI)",
+            value=bool(current_reranker),
+        )
 
-        with c_ret2:
-            cfg_pool = st.number_input(
-                "Stage 1 Candidate Pool Size",
-                min_value=1,
-                max_value=50,
-                value=int(current_pool),
-                help="Number of initial candidate chunks retrieved by Vector/FTS search before reranking.",
-            )
-            cfg_top_k = st.number_input(
-                "Final Top K Context Chunks for LLM",
-                min_value=1,
-                max_value=20,
-                value=int(current_top_k),
-                help="Final number of top-ranked context chunks passed into the generation prompt.",
-            )
+    with c_ret2:
+        cfg_pool = st.number_input(
+            "Stage 1 Candidate Pool Size",
+            min_value=1,
+            max_value=50,
+            value=int(current_pool),
+            help="Number of initial candidate chunks retrieved by Vector/FTS search before reranking.",
+        )
+        cfg_top_k = st.number_input(
+            "Final Top K Context Chunks for LLM",
+            min_value=1,
+            max_value=20,
+            value=int(current_top_k),
+            help="Final number of top-ranked context chunks passed into the generation prompt.",
+        )
 
-        st.divider()
+    st.divider()
 
-        # -------------------------------------------------------------------
-        # 2. Generation Models & Grounding Strategy
-        # -------------------------------------------------------------------
-        st.subheader("2. 🤖 Default Generation Model & Grounding Strategy")
-        c_gen1, c_gen2 = st.columns(2)
+    # -------------------------------------------------------------------
+    # 2. Generation Models & Grounding Strategy
+    # -------------------------------------------------------------------
+    st.subheader("2. 🤖 Default Generation Model & Grounding Strategy")
+    c_gen1, c_gen2 = st.columns(2)
 
-        with c_gen1:
-            model_options = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
-            m_idx = model_options.index(current_gen_model) if current_gen_model in model_options else 0
-            cfg_gen_model = st.selectbox("Default Generation Model", model_options, index=m_idx)
+    with c_gen1:
+        model_options = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+        m_idx = model_options.index(current_gen_model) if current_gen_model in model_options else 0
+        cfg_gen_model = st.selectbox(
+            "Default Generation Model",
+            model_options,
+            index=m_idx,
+        )
 
-        with c_gen2:
-            preset_options = list_prompt_presets() + ["Custom Template"]
-            p_idx = preset_options.index(current_prompt_preset) if current_prompt_preset in preset_options else 0
+    with c_gen2:
+        preset_options = list_prompt_presets() + ["Custom Template"]
+
+        # Session state synchronization for preset and prompt text
+        if "settings_db_preset_sync" not in st.session_state or st.session_state.get("settings_db_preset_sync") != current_prompt_preset:
+            st.session_state["settings_db_preset_sync"] = current_prompt_preset
+            st.session_state["settings_last_preset"] = current_prompt_preset
+            st.session_state["settings_prompt_text"] = current_prompt_tpl
+
+        col_pr_preset, col_pr_reset = st.columns([3, 1])
+        with col_pr_preset:
+            p_idx = preset_options.index(st.session_state.get("settings_last_preset", current_prompt_preset)) if st.session_state.get("settings_last_preset", current_prompt_preset) in preset_options else 0
             cfg_prompt_preset = st.selectbox(
                 "Default Prompt Grounding Preset",
                 preset_options,
                 index=p_idx,
                 help="Determines default grounding strictness, section headers, and hallucination guardrails.",
             )
+        with col_pr_reset:
+            st.write("")
+            st.write("")
+            if st.button("🔄 Reset Prompt", key="btn_reset_settings_prompt"):
+                if cfg_prompt_preset in PROMPT_PRESETS:
+                    st.session_state["settings_prompt_text"] = PROMPT_PRESETS[cfg_prompt_preset]
+                    st.rerun()
 
-        cfg_prompt_tpl = st.text_area(
-            "Default Standard System Prompt (`{context}`, `{query}`)",
-            value=current_prompt_tpl,
+        # Update prompt template if preset dropdown selection changed
+        if st.session_state.get("settings_last_preset") != cfg_prompt_preset:
+            st.session_state["settings_last_preset"] = cfg_prompt_preset
+            if cfg_prompt_preset in PROMPT_PRESETS:
+                st.session_state["settings_prompt_text"] = PROMPT_PRESETS[cfg_prompt_preset]
+
+    cfg_prompt_tpl = st.text_area(
+        "Default Standard System Prompt (`{context}`, `{query}`)",
+        value=st.session_state.get("settings_prompt_text", current_prompt_tpl),
+        height=160,
+        help="Prompt used for standard user questions without attachments.",
+    )
+
+    with st.expander("📎 Edit Multimodal Report Attachment Prompt Template", expanded=False):
+        cfg_attached_tpl = st.text_area(
+            "Attached Document Prompt Template (`{context}`, `{query}`)",
+            value=current_attached_tpl,
             height=160,
-            help="Prompt used for standard user questions without attachments.",
+            help="Prompt used when users upload external scan reports or audit documents.",
         )
 
-        with st.expander("📎 Edit Multimodal Report Attachment Prompt Template", expanded=False):
-            cfg_attached_tpl = st.text_area(
-                "Attached Document Prompt Template (`{context}`, `{query}`)",
-                value=current_attached_tpl,
-                height=160,
-                help="Prompt used when users upload external scan reports or audit documents.",
+    st.divider()
+
+    # -------------------------------------------------------------------
+    # 3. Ingestion & Chunking Defaults
+    # -------------------------------------------------------------------
+    st.subheader("3. ⚙️ Ingestion & Chunking Defaults")
+    c_chk1, c_chk2 = st.columns(2)
+
+    with c_chk1:
+        chunk_strategies = ["recursive", "semantic"]
+        cs_idx = chunk_strategies.index(current_chunk_strategy) if current_chunk_strategy in chunk_strategies else 0
+        cfg_chunk_strategy = st.selectbox(
+            "Default Ingestion Chunking Strategy",
+            chunk_strategies,
+            index=cs_idx,
+        )
+
+    with c_chk2:
+        c_sz1, c_sz2 = st.columns(2)
+        with c_sz1:
+            cfg_chunk_size = st.number_input(
+                "Target Chunk Size (chars)",
+                min_value=100,
+                max_value=4000,
+                value=int(current_chunk_size),
+            )
+        with c_sz2:
+            cfg_chunk_overlap = st.number_input(
+                "Chunk Overlap (chars)",
+                min_value=0,
+                max_value=500,
+                value=int(current_chunk_overlap),
             )
 
-        st.divider()
+    st.divider()
 
-        # -------------------------------------------------------------------
-        # 3. Ingestion & Chunking Defaults
-        # -------------------------------------------------------------------
-        st.subheader("3. ⚙️ Ingestion & Chunking Defaults")
-        c_chk1, c_chk2 = st.columns(2)
+    # Save button
+    col_btn_save, col_btn_info = st.columns([1.5, 3])
+    with col_btn_save:
+        btn_save = st.button("💾 Save Production Configuration", type="primary", use_container_width=True)
 
-        with c_chk1:
-            chunk_strategies = ["recursive", "semantic"]
-            cs_idx = chunk_strategies.index(current_chunk_strategy) if current_chunk_strategy in chunk_strategies else 0
-            cfg_chunk_strategy = st.selectbox("Default Ingestion Chunking Strategy", chunk_strategies, index=cs_idx)
+    if btn_save:
+        final_tpl = cfg_prompt_tpl
+        if cfg_prompt_preset in PROMPT_PRESETS and not (final_tpl or "").strip():
+            final_tpl = PROMPT_PRESETS[cfg_prompt_preset]
 
-        with c_chk2:
-            c_sz1, c_sz2 = st.columns(2)
-            with c_sz1:
-                cfg_chunk_size = st.number_input("Target Chunk Size (chars)", min_value=100, max_value=4000, value=int(current_chunk_size))
-            with c_sz2:
-                cfg_chunk_overlap = st.number_input("Chunk Overlap (chars)", min_value=0, max_value=500, value=int(current_chunk_overlap))
+        updates = {
+            "pipeline.use_hybrid": bool(cfg_hybrid),
+            "pipeline.use_reranker": bool(cfg_reranker),
+            "pipeline.pool_size": int(cfg_pool),
+            "pipeline.final_top_k": int(cfg_top_k),
+            "models.generation": str(cfg_gen_model),
+            "pipeline.prompt_preset": str(cfg_prompt_preset),
+            "pipeline.prompt_template": str(final_tpl),
+            "pipeline.attached_prompt_template": str(cfg_attached_tpl),
+            "pipeline.chunking_strategy": str(cfg_chunk_strategy),
+            "pipeline.chunk_size": int(cfg_chunk_size),
+            "pipeline.chunk_overlap": int(cfg_chunk_overlap),
+        }
 
-        st.divider()
-
-        # Submit button
-        col_btn_save, col_btn_info = st.columns([1.5, 3])
-        with col_btn_save:
-            btn_save = st.form_submit_button("💾 Save Production Configuration", type="primary", use_container_width=True)
-
-        if btn_save:
-            # If user selected a preset other than Custom, update the template if it was left untouched or matches preset
-            final_tpl = cfg_prompt_tpl
-            if cfg_prompt_preset in PROMPT_PRESETS and not final_tpl.strip():
-                final_tpl = PROMPT_PRESETS[cfg_prompt_preset]
-
-            updates = {
-                "pipeline.use_hybrid": cfg_hybrid,
-                "pipeline.use_reranker": cfg_reranker,
-                "pipeline.pool_size": int(cfg_pool),
-                "pipeline.final_top_k": int(cfg_top_k),
-                "models.generation": cfg_gen_model,
-                "pipeline.prompt_preset": cfg_prompt_preset,
-                "pipeline.prompt_template": final_tpl,
-                "pipeline.attached_prompt_template": cfg_attached_tpl,
-                "pipeline.chunking_strategy": cfg_chunk_strategy,
-                "pipeline.chunk_size": int(cfg_chunk_size),
-                "pipeline.chunk_overlap": int(cfg_chunk_overlap),
-            }
-
-            success = set_many_settings(updates, updated_by="Admin Dashboard")
-            if success:
-                st.success("✅ Production RAG Configuration saved! Applied immediately across Chat App and API.")
-                st.rerun()
-            else:
-                st.error("Failed to persist configuration to PostgreSQL.")
+        success = set_many_settings(updates, updated_by="Admin Dashboard")
+        if success:
+            st.session_state["settings_db_preset_sync"] = str(cfg_prompt_preset)
+            st.session_state["settings_last_preset"] = str(cfg_prompt_preset)
+            st.session_state["settings_prompt_text"] = str(final_tpl)
+            st.success("✅ Production RAG Configuration saved! Applied immediately across Chat App and API.")
+            st.rerun()
+        else:
+            st.error("Failed to persist configuration to PostgreSQL.")
 
     # -----------------------------------------------------------------------
     # 4. Active Database Overrides Table & Reset Action
@@ -215,6 +262,12 @@ def render_settings_tab():
             if st.button("🔄 Reset to `config.yaml` Baseline Defaults", type="secondary"):
                 for k in all_active.keys():
                     delete_setting(k)
+                clear_settings_cache()
+                st.session_state.pop("settings_db_preset_sync", None)
+                st.session_state.pop("settings_last_preset", None)
+                st.session_state.pop("settings_prompt_text", None)
                 st.success("✅ All database overrides cleared. System restored to config.yaml defaults.")
                 st.rerun()
+
+
 
