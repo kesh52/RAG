@@ -29,7 +29,7 @@ def test_health_check(client):
 def test_root_info(client):
     response = client.get("/")
     assert response.status_code == 200
-    assert response.json()["name"] == "RAG Chat UI API"
+    assert response.json()["name"] == "RAG Chat API"
 
 
 # ---------------------------------------------------------------------------

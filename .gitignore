@@ -20,4 +20,6 @@ env/
 # Run-time downloaded assets
 assets/
 
+*.log
+
 

@@ -50,15 +50,6 @@ def create_app() -> FastAPI:
     app.include_router(users_router, prefix=api_v1_prefix)
     app.include_router(feedback_router, prefix=api_v1_prefix)
 
-    import os
-    from fastapi.responses import FileResponse
-
-    static_index = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html")
-
-    @app.get("/chat", tags=["Web Chat UI"], response_class=FileResponse)
-    async def web_chat():
-        return FileResponse(static_index, media_type="text/html")
-
     # Health check & Root info
     @app.get("/health", tags=["Health"])
     async def health_check():
@@ -67,9 +58,8 @@ def create_app() -> FastAPI:
     @app.get("/", tags=["Info"])
     async def root_info():
         return {
-            "name": "RAG Chat UI API",
+            "name": "RAG Chat API",
             "version": "1.0.0",
-            "chat_ui": "/chat",
             "docs": "/docs",
             "openapi": "/openapi.json",
         }

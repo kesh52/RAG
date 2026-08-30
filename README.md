@@ -34,8 +34,6 @@ AI/
 │   │   ├── dependencies.py      # Dependency injection providers
 │   │   ├── models.py            # Pydantic validation & response schemas
 │   │   ├── memory.py            # Conversational memory & query contextualizer
-│   │   ├── static/              # Web Chat UI (HTML5 + Tailwind CSS + SSE)
-│   │   │   └── index.html       # Full-screen conversational client
 │   │   └── routes/              # API v1 route handlers
 │   │       ├── chats.py         # Sessions, multi-turn messages, attachments, export
 │   │       ├── users.py         # User management & session listing
@@ -93,27 +91,25 @@ python3 -m scripts.seed_db
 
 ---
 
-## 💬 Running the User Chat Interfaces
+## 🚀 Running the Services
 
-### Option A: FastAPI Web Chat (Recommended for Production & End Users)
-Start the high-performance FastAPI server:
+### 1. Start FastAPI RAG Chat Backend Service
+Start the high-performance FastAPI server exposing REST and SSE streaming endpoints:
 ```bash
 python3 run_api.py
 ```
-- **Web Chat UI**: 👉 [http://localhost:8000/chat](http://localhost:8000/chat)
 - **Interactive OpenAPI Docs (Swagger)**: [http://localhost:8000/docs](http://localhost:8000/docs)
 - **Alternative ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+- **Health Check**: [http://localhost:8000/health](http://localhost:8000/health)
 
-### Option B: Standalone Streamlit Chat App
-Launch the dedicated conversational Streamlit client:
+### 2. Launch Standalone User Chat App
+Launch the dedicated ChatGPT-style Streamlit conversational interface:
 ```bash
 streamlit run chat_app.py
 ```
 
----
-
-## 🔬 Running the Admin Dashboard
-Launch the operational management portal for ETL crawlers, database health checks, automated Ragas benchmarks, and feedback dataset triage:
+### 3. Launch Admin Operations Dashboard
+Launch the operational management portal for ETL crawlers, database health checks, automated Ragas benchmarks, and feedback triage:
 ```bash
 streamlit run admin_app.py
 ```
