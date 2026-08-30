@@ -9,16 +9,20 @@ import sys
 import argparse
 import logging
 import requests
+from dotenv import load_dotenv
 
 # Ensure root is on import path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Load environment variables from .env
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("publish_confluence")
 
 
 def publish_page(space_key: str, parent_id: str | None, title: str, xhtml_path: str):
-    domain = os.getenv("CONFLUENCE_DOMAIN", "").strip().replace("https://", "").replace("http://", "")
+    domain = os.getenv("CONFLUENCE_DOMAIN", "").strip().replace("https://", "").replace("http://", "").rstrip("/")
     username = os.getenv("CONFLUENCE_USERNAME", "").strip()
     api_token = os.getenv("CONFLUENCE_API_TOKEN", "").strip()
 
@@ -97,7 +101,7 @@ if __name__ == "__main__":
     parser.add_argument("--space-key", "-s", type=str, default="DEV", help="Target Confluence space key (default: DEV).")
     parser.add_argument("--parent-id", "-p", type=str, default=None, help="Optional parent page ID to nest the page under.")
     parser.add_argument("--title", "-t", type=str, default="RAG Platform: Implemented Requirements & Architectural Specification", help="Page title.")
-    parser.add_argument("--file", "-f", type=str, default="docs/confluence_storage_format.xhtml", help="Path to Confluence storage format XHTML.")
+    parser.add_argument("--file", "-f", type=str, default="docs/confluence_storage_format.html", help="Path to Confluence storage format XHTML/HTML.")
     args = parser.parse_args()
 
     root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

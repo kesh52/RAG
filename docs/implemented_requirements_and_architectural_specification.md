@@ -85,11 +85,11 @@ This component transforms raw textual chunks into dense vector representations a
 #### Implemented Functional Requirements (FR)
 - **`FR-VEC-01` Dense Vector Embedding Generation**: Vectorizes strings using Vertex AI `text-embedding-005` with 768 output dimensions and `RETRIEVAL_QUERY`/`RETRIEVAL_DOCUMENT` task types (`VertexEmbeddingService`).
 - **`FR-VEC-02` Hybrid Document Schema with Auto-Generated FTS**: Maintains the `documents` table with generated English `tsvector` columns and JSONB metadata.
-- **`FR-VEC-03` Dual Connection Engine (Cloud SQL & Direct Socket)**: Establishes database connectivity via `google-cloud-sql-connector` with IAM service account impersonation (`public`, `private`, or `psc` IP modes) or falls back to direct TCP socket connection via `psycopg` (`get_connection`).
+- **`FR-VEC-03` Dual Connection Engine (Cloud SQL & Direct Socket) with Connection Pooling**: Establishes pooled database connectivity via `psycopg_pool.ConnectionPool` integrated with `google-cloud-sql-connector` (IAM impersonation for `public`, `private`, or `psc` modes) or fallback direct TCP socket connection (`get_pool`, `get_connection`, `close_pool`).
 - **`FR-VEC-04` Schema Versioning & Automated Repair**: Executes migration lifecycles via Alembic scripts and provides programmatic self-healing for missing tables/columns (`run_migrations.py`).
 
 #### Technical & Non-Functional Decisions (NFR)
-- **Libraries**: `psycopg` (v3), `pgvector`, `google-cloud-sql-connector`, `alembic`, `google-genai`.
+- **Libraries**: `psycopg` (v3), `psycopg_pool`, `pgvector`, `google-cloud-sql-connector`, `alembic`, `google-genai`.
 - **Database Engine**: PostgreSQL 16+ with `vector` extension.
 - **Index Definitions**:
   - Dense Vector: HNSW index on `embedding` using `vector_cosine_ops` (`idx_documents_embedding_hnsw`).
@@ -301,10 +301,10 @@ The UI component provides an interactive Streamlit-based web control plane for m
 
 | Area | Current Implementation | Limitation / Technical Debt | Recommended Remediation |
 | :--- | :--- | :--- | :--- |
-| **Connection Pooling** | `get_connection()` creates and opens a new database connection per query/transaction. | Connection overhead under concurrent requests; potential connection exhaustion in Cloud SQL. | Implement a connection pool via `psycopg_pool.ConnectionPool`. |
+| **Connection Pooling** | `psycopg_pool.ConnectionPool` managing dynamic pool sizes for Cloud SQL & TCP socket connections (`get_pool`, `get_connection`). | None (Implemented). | Parameterized in `config.yaml` (`min_pool_size`, `max_pool_size`, `pool_timeout`, etc.). |
 | **Embedding Task Types** | `VertexEmbeddingService` hardcodes `task_type="RETRIEVAL_QUERY"`. | Ingestion chunks vectorized during ETL ideally require `RETRIEVAL_DOCUMENT` to optimize asymmetric cosine distance scoring in `text-embedding-005`. | Add a `task_type` parameter to `get_dense_embedding(text, task_type="RETRIEVAL_QUERY")`. |
 | **Asynchronous I/O** | Confluence scraping, asset downloads, and Gemini API calls execute synchronously. | Ingestion of large Confluence spaces with many attachments blocks worker threads sequentially. | Refactor crawling and batch processing using `asyncio` and `httpx`/`aiohttp`. |
-| **Streaming Generation** | UI awaits complete response generation before rendering. | Higher time-to-first-token perceived latency in the Streamlit Playground. | Utilize `client.models.generate_content_stream` paired with `st.write_stream`. |
+| **Streaming Generation** | Real-time token streaming via `client.models.generate_content_stream` and `st.write_stream` in Streamlit Playground and Chat UI (`tab_playground.py`, `chat_app.py`). | None (Implemented). | Perceived time-to-first-token latency minimized with dynamic stream rendering and asynchronous SSE API endpoints. |
 | **Confluence Auth** | Confluence client uses Basic HTTP authentication (`username`, `api_token`). | Incompatible with enterprise OAuth 2.0 (3LO) or Atlassian Connect app authentication standards. | Add OAuth 2.0 Bearer token authorization support. |
 
 ---

@@ -65,7 +65,29 @@ class Config:
                 return default
         return val if val is not None else default
 
+    def get_dynamic(self, key_path: str, default=None):
+        """Gets a configuration property with PostgreSQL dynamic overrides checking first,
+        falling back to YAML config and defaults.
+        """
+        try:
+            from src.db.settings_store import get_setting
+            db_val = get_setting(key_path, default=None)
+            if db_val is not None:
+                return db_val
+        except Exception:
+            pass
+        return self.get(key_path, default)
+
+    def set_dynamic(self, key_path: str, value, updated_by: str = "admin") -> bool:
+        """Sets a dynamic configuration override in PostgreSQL."""
+        try:
+            from src.db.settings_store import set_setting
+            return set_setting(key_path, value, updated_by=updated_by)
+        except Exception:
+            return False
+
 
 # Global configuration singleton instance
 config = Config()
+
 

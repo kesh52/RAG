@@ -75,6 +75,11 @@ INSTANCE_CONNECTION_NAME=your_gcp_project:europe-west3:your_db_instance
 GCP_PROJECT=your_gcp_project
 GCP_LOCATION=europe-west3
 GOOGLE_CLOUD_QUOTA_PROJECT=your_gcp_project
+
+# Admin Dashboard Authentication (Optional - defaults to admin/admin)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=your_secure_admin_password
+ADMIN_AUTH_ENABLED=true
 ```
 
 ### 3. Connect to Cloud SQL & Run Migrations

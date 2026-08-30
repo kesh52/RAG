@@ -1,4 +1,4 @@
-psycopg[binary]
+psycopg[binary,pool]
 pgvector
 google-genai
 google-cloud-discoveryengine
@@ -17,3 +17,5 @@ scikit-learn
 fastapi
 uvicorn[standard]
 python-multipart
+plotly
+

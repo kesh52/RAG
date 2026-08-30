@@ -17,6 +17,7 @@ from src.ui.db_helpers import (
     _fetch_documents,
     _fetch_embeddings_for_viz,
     _fetch_generic_table_data,
+    run_embedding_quality_audit,
 )
 
 
@@ -139,10 +140,47 @@ def render_db_tab():
         st.divider()
 
         # --- Embedding visualization ---
-        st.subheader("Embedding Space Visualization")
-        viz_method = st.radio("Reduction method", ["PCA", "t-SNE"], horizontal=True, key="doc_viz_method")
+        st.subheader("🌌 Embedding Space Visualization (2D Projection)")
+        st.markdown(
+            "Project the **768-dimensional dense vector embeddings** (`text-embedding-005`) into 2D space "
+            "to visually inspect semantic clustering, topic distribution, and identify coverage gaps or outliers across your knowledge base."
+        )
 
-        if st.button("🎨 Generate Visualization", key="btn_gen_viz"):
+        with st.expander("ℹ️ How to interpret Embedding Space Projections & Axis Scales", expanded=False):
+            st.markdown(
+                """
+                - **Semantic Proximity**: Points located close together in 2D space share similar technical concepts, error domains, or runbook procedures.
+                - **Clusters**: Tight groupings indicate well-documented topics with high knowledge density (e.g. database failover, auth errors).
+                - **Outliers & Sparse Areas**: Isolated points represent unique topics or potential documentation gaps in the knowledge base.
+                
+                ---
+                #### 📏 Understanding the X and Y Scales:
+                - **When using PCA (Principal Component Analysis)**:
+                  - **X-axis (`PC1` - Principal Component 1)**: The single linear direction capturing the **maximum variance** across all 768 embedding dimensions (e.g. general architectural concepts vs operational runtime errors).
+                  - **Y-axis (`PC2` - Principal Component 2)**: The orthogonal (perpendicular) direction capturing the **second largest variance**, completely uncorrelated with PC1.
+                  - *Units*: Normalized coordinates centered at `0.0`. Greater distance along an axis reflects greater conceptual divergence along that principal variation vector.
+                - **When using t-SNE (t-Distributed Stochastic Neighbor Embedding)**:
+                  - **X-axis & Y-axis (`t-SNE Dim 1`, `t-SNE Dim 2`)**: Non-linear manifold coordinates optimized to place nearest neighbors close together.
+                  - *Units*: **Arbitrary coordinates**. The exact numerical values have no physical units—only the **relative distance between local points** is meaningful for topic clustering.
+                """
+            )
+
+        col_method, col_info_box = st.columns([1, 2])
+        with col_method:
+            viz_method = st.radio(
+                "Dimensionality Reduction Method",
+                ["PCA", "t-SNE"],
+                horizontal=True,
+                key="doc_viz_method",
+                help="PCA preserves global geometric variance; t-SNE reveals local semantic clusters."
+            )
+        with col_info_box:
+            if viz_method == "PCA":
+                st.caption("📐 **PCA Mode:** Orthogonal linear transformation from 768D to 2D (PC1 = primary variance, PC2 = secondary variance).")
+            else:
+                st.caption("🔍 **t-SNE Mode:** Probabilistic non-linear manifold mapping for tight semantic clusters (arbitrary scale).")
+
+        if st.button("🎨 Generate 2D Embedding Projection", type="primary", key="btn_gen_viz"):
             ids, embeddings, types_ = _fetch_embeddings_for_viz()
             if len(embeddings) < 2:
                 st.warning("Need at least 2 documents with embeddings to visualize.")
@@ -153,23 +191,121 @@ def render_db_tab():
 
                 X = np.array(embeddings)
 
-                with st.spinner(f"Computing {viz_method} projection..."):
+                with st.spinner(f"Computing {viz_method} projection for {len(X)} document embeddings (768D → 2D)..."):
+                    explained_var_text = ""
                     if viz_method == "PCA":
+                        x_label = "Principal Component 1 (PC1)"
+                        y_label = "Principal Component 2 (PC2)"
                         reducer = PCA(n_components=2, random_state=42)
+                        coords = reducer.fit_transform(X)
+                        var_ratio = reducer.explained_variance_ratio_
+                        explained_var_text = f"Explained Variance: PC1 = **{var_ratio[0]*100:.1f}%**, PC2 = **{var_ratio[1]*100:.1f}%** (Total Captured: **{(var_ratio[0]+var_ratio[1])*100:.1f}%**)"
                     else:
-                        perplexity = min(30, len(X) - 1)
+                        x_label = "t-SNE Dimension 1"
+                        y_label = "t-SNE Dimension 2"
+                        perplexity = min(30, max(2, len(X) - 1))
                         reducer = TSNE(n_components=2, perplexity=perplexity, random_state=42)
-
-                    coords = reducer.fit_transform(X)
+                        coords = reducer.fit_transform(X)
 
                 viz_df = pd.DataFrame({
-                    "x": coords[:, 0],
-                    "y": coords[:, 1],
+                    x_label: coords[:, 0],
+                    y_label: coords[:, 1],
                     "ID": ids,
                     "Type": types_,
                 })
 
-                st.scatter_chart(viz_df, x="x", y="y", color="Type", size=20)
+                # Display summary metrics
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Visualized Documents", len(viz_df))
+                m2.metric("Original Dimension", "768D")
+                m3.metric("Projected Dimension", "2D Plane")
+
+                if explained_var_text:
+                    st.caption(f"📊 {explained_var_text}")
+
+                st.scatter_chart(
+                    viz_df,
+                    x=x_label,
+                    y=y_label,
+                    color="Type",
+                    size=25,
+                )
+
+                # Axis & Scale explanation card directly under the chart
+                with st.container():
+                    col_ax_x, col_ax_y = st.columns(2)
+                    if viz_method == "PCA":
+                        with col_ax_x:
+                            st.info(f"↔️ **X-Axis ({x_label}):** Captures the single largest axis of semantic variance ({var_ratio[0]*100:.1f}% of total information).")
+                        with col_ax_y:
+                            st.info(f"↕️ **Y-Axis ({y_label}):** Captures the second largest independent axis of variance ({var_ratio[1]*100:.1f}% of total information).")
+                    else:
+                        with col_ax_x:
+                            st.info(f"↔️ **X-Axis ({x_label}):** Non-linear coordinate mapping local semantic neighborhoods.")
+                        with col_ax_y:
+                            st.info(f"↕️ **Y-Axis ({y_label}):** Non-linear coordinate. Note: scale values are arbitrary relative distances.")
+
+                st.caption("💡 *Hover over points on the chart to inspect coordinates and document types.*")
+
+        # --- AI Knowledge Base Topology & Quality Audit Section ---
+        st.markdown("---")
+        st.subheader("🤖 AI Knowledge Base Quality & Topology Audit")
+        st.markdown(
+            "Run an automated AI diagnostic across the vector database to analyze chunk quality, "
+            "detect outliers and documentation blind spots, find redundant near-duplicates, and receive prioritized recommendations."
+        )
+
+        if st.button("🚀 Run AI Quality Audit & Recommendations", type="primary", key="btn_run_ai_quality_audit"):
+            with st.spinner("Analyzing knowledge base topology, calculating redundancy & running AI audit..."):
+                audit_res = run_embedding_quality_audit()
+
+            if "error" in audit_res:
+                st.error(audit_res["error"])
+            else:
+                m = audit_res["metrics"]
+                st.success("✅ AI Audit Completed Successfully!")
+
+                # Key Metric Tiles
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Total Chunks", m["total_documents"])
+                k2.metric("Avg Chunk Length", f"{m['avg_char_length']} chars")
+                k3.metric("Detected Outliers", m["outliers_count"], help="Documents >2σ distance from the corpus centroid.")
+                k4.metric("Near-Duplicate Pairs", m["near_duplicate_pairs"], help="Document pairs with >95% cosine similarity.")
+
+                # Diagnostic details
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    st.caption(f"📏 **Chunk Size Bounds:** Min `{m['min_char_length']}` chars | Max `{m['max_char_length']}` chars")
+                    st.caption(f"⚠️ **Undersized (<100 chars):** `{m['short_chunks_count']}` | **Oversized (>1800 chars):** `{m['long_chunks_count']}`")
+                with col_d2:
+                    st.caption(f"🌐 **Corpus Centroid Dispersion:** `{m['mean_centroid_distance']}`")
+                    st.caption(f"📂 **Document Types Breakdown:** {json.dumps(m['type_breakdown'])}")
+
+                # Full AI Review & Actionable Recommendations Card
+                st.markdown("### 📋 AI Audit Report & Actionable Recommendations")
+                st.markdown(audit_res["ai_review"])
+
+                # Expandable diagnostics for Outliers and Duplicates
+                if audit_res["outliers"]:
+                    with st.expander(f"📍 Inspect {len(audit_res['outliers'])} Outlier Documents (Isolated in Embedding Space)", expanded=False):
+                        for o in audit_res["outliers"]:
+                            st.markdown(f"**Document ID `{o['id']}`** | Type: `{o['doc_type']}` | Distance: `{o['distance']:.3f}`")
+                            st.caption(f"Source: `{o['source']}`")
+                            st.text_area("Snippet", o["snippet"], height=70, key=f"outlier_snip_{o['id']}", disabled=True)
+                            st.markdown("---")
+
+                if audit_res["near_duplicates"]:
+                    with st.expander(f"🔄 Inspect {len(audit_res['near_duplicates'])} Near-Duplicate Overlap Pairs (>95% Similarity)", expanded=False):
+                        for d in audit_res["near_duplicates"]:
+                            st.markdown(f"**Pair `{d['id1']}` ↔ `{d['id2']}`** | Cosine Similarity: **{d['similarity']*100:.1f}%**")
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.caption(f"Doc `{d['id1']}` ({d['source1']})")
+                                st.text_area("Doc 1", d["snippet1"], height=70, key=f"dup1_{d['id1']}_{d['id2']}", disabled=True)
+                            with c2:
+                                st.caption(f"Doc `{d['id2']}` ({d['source2']})")
+                                st.text_area("Doc 2", d["snippet2"], height=70, key=f"dup2_{d['id1']}_{d['id2']}", disabled=True)
+                            st.markdown("---")
 
         st.divider()
 

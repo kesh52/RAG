@@ -110,6 +110,9 @@ def run_migrations():
     except Exception as e:
         logger.error(f"Error verifying database schema: {e}")
         sys.exit(1)
+    finally:
+        from src.db import close_pool
+        close_pool()
 
 if __name__ == "__main__":
     run_migrations()

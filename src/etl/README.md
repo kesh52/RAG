@@ -1,6 +1,6 @@
 # Confluence ETL Pipeline & Continuous Feedback Loop
 
-This directory contains the **Extract, Transform, and Load (ETL)** pipeline that crawls Confluence spaces, parses multimodal content (structured text, images, PDF documents), generates vector embeddings with Vertex AI, and indexes them into PostgreSQL (`pgvector`).
+This directory contains the high-performance **Extract, Transform, and Load (ETL)** pipeline that crawls Confluence spaces asynchronously using `asyncio` and `httpx`, parses multimodal content (structured text, images, PDF documents), performs batch vector embeddings with Vertex AI, and indexes them into PostgreSQL (`pgvector`).
 
 It also defines how **user feedback** from the interactive Playground feeds back into tuning ETL chunking, crawler depth, and automated regression datasets.
 
@@ -10,18 +10,18 @@ It also defines how **user feedback** from the interactive Playground feeds back
 
 | Module | Responsibility | Key Classes / Functions |
 | :--- | :--- | :--- |
-| [`confluence.py`](file:///Users/ilja/DEV/AI/src/etl/confluence.py) | Scrapes Confluence XHTML, extracts clean text, image tags, and PDF links; manages BFS crawling with depth & cycle control. | `APIConfluenceClient`, `RecursiveCrawler`, `ConfluenceHTMLParser` |
+| [`confluence.py`](file:///Users/ilja/DEV/AI/src/etl/confluence.py) | Asynchronous Confluence REST client (`httpx.AsyncClient`) with connection pooling, authentication, HTML/XHTML parsing, and concurrent BFS crawler (`asyncio.gather`, `asyncio.Semaphore`). | `BaseConfluenceClient`, `APIConfluenceClient`, `RecursiveCrawler`, `ConfluenceHTMLParser` |
 | [`chunking.py`](file:///Users/ilja/DEV/AI/src/etl/chunking.py) | Configurable text chunking strategies: **Recursive** delimiter splitting and **Semantic** embedding distance breakpoint detection. | `RecursiveTextChunker`, `SemanticChunker`, `get_chunker` |
-| [`pipeline.py`](file:///Users/ilja/DEV/AI/src/etl/pipeline.py) | End-to-end orchestrator: crawls pages, invokes Gemini for image & PDF transcription, embeds chunks, and saves to PostgreSQL in a transaction. | `ConfluenceETLPipeline` |
+| [`pipeline.py`](file:///Users/ilja/DEV/AI/src/etl/pipeline.py) | End-to-end async orchestrator: concurrent page crawling, concurrent image & PDF asset downloading/transcription, batch vector embedding, and transactional database ingestion. | `ConfluenceETLPipeline` |
 
 ### Multimodal Ingestion Flow
 
 ```mermaid
 graph TD
-    A["Confluence Storage XHTML<br/>(APIConfluenceClient)"] --> B["Recursive BFS Crawler<br/>(max_depth=1..5)"]
-    B --> C1["Structured Text"]
-    B --> C2["Attached Images (.png, .jpg, .bmp)"]
-    B --> C3["Attached PDFs (.pdf)"]
+    A["Confluence Storage XHTML<br/>(APIConfluenceClient with httpx)"] --> B["Concurrent Async BFS Crawler<br/>(max_depth=1..5, semaphore=N)"]
+    B --> C1["Structured Text Chunks"]
+    B --> C2["Attached Images (.png, .jpg, .bmp)<br/>(Async Download)"]
+    B --> C3["Attached PDFs (.pdf)<br/>(Async Download)"]
     
     C1 --> D1{"Configurable Chunker<br/>(get_chunker)"}
     C2 --> D2["Gemini 2.5 Flash<br/>(Visual Layout & Diagram Transcription)"]
@@ -33,9 +33,9 @@ graph TD
     D1 -->|Recursive Strategy| D1a["RecursiveTextChunker<br/>(chunk_size=500, overlap=50)"]
     D1 -->|Semantic Strategy| D1b["SemanticChunker<br/>(Embedding Cosine Breakpoints)"]
     
-    D1a --> E["Vertex AI Embedding Service<br/>(text-embedding-005)"]
+    D1a --> E["Batch Embedding Service<br/>(get_dense_embeddings, batch_size=20)"]
     D1b --> E
-    E --> F[("PostgreSQL (pgvector + tsvector)<br/>'documents' table")]
+    E --> F[("PostgreSQL (pgvector + tsvector)<br/>'documents' table (executemany transaction)")]
 ```
 
 ---
@@ -89,13 +89,12 @@ When domain experts test queries in the Playground and provide a **Corrected Ref
 
 ### Option B: Via Command-Line Script
 ```bash
-# Ingest with default strategy (from config.yaml)
+# Ingest with default strategy and concurrency (from config.yaml)
 python3 scripts/run_etl.py 123456 --max-depth 2
+
+# Ingest with customized concurrency and batch size
+python3 scripts/run_etl.py 123456 --max-depth 2 --concurrency 10 --batch-size 50
 
 # Ingest specifically using Semantic Chunking
 python3 scripts/run_etl.py 123456 --max-depth 2 --strategy semantic
-
-# Ingest specifically using Recursive Chunking
-python3 scripts/run_etl.py 123456 --max-depth 2 --strategy recursive
 ```
-

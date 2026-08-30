@@ -124,3 +124,141 @@ METRIC_INFO = {
     ),
 }
 
+
+# ===========================================================================
+# Plotly Chart Helpers for Professional Evaluation Dashboards
+# ===========================================================================
+
+def create_radar_comparison_chart(
+    runs_data: list[dict],
+    title: str = "RAG Multi-Dimensional Quality Radar",
+):
+    """Generate an interactive Plotly radar chart comparing 1 or more runs across the 4 RAGAS metrics."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+
+    categories = ["Faithfulness", "Answer Relevancy", "Context Precision", "Context Recall"]
+    # Close the radar loop
+    categories_closed = categories + [categories[0]]
+
+    fig = go.Figure()
+
+    colors = [
+        {"line": "rgb(31, 119, 180)", "fill": "rgba(31, 119, 180, 0.2)"},
+        {"line": "rgb(46, 204, 113)", "fill": "rgba(46, 204, 113, 0.25)"},
+        {"line": "rgb(231, 76, 60)", "fill": "rgba(231, 76, 60, 0.2)"},
+        {"line": "rgb(155, 89, 182)", "fill": "rgba(155, 89, 182, 0.2)"},
+    ]
+
+    # Add Target Benchmark Polygon (0.85 Target)
+    target_vals = [0.85, 0.85, 0.80, 0.80, 0.85]
+    fig.add_trace(
+        go.Scatterpolar(
+            r=target_vals,
+            theta=categories_closed,
+            mode="lines",
+            name="Target Quality (≥0.80)",
+            line=dict(color="rgba(128, 128, 128, 0.6)", dash="dash", width=1.5),
+            hoverinfo="name+r",
+        )
+    )
+
+    for i, item in enumerate(runs_data):
+        color = colors[i % len(colors)]
+        r_vals = [
+            item.get("faithfulness", 0) or 0,
+            item.get("answer_relevancy", 0) or 0,
+            item.get("context_precision", 0) or 0,
+            item.get("context_recall", 0) or 0,
+        ]
+        # Close loop
+        r_vals_closed = r_vals + [r_vals[0]]
+
+        fig.add_trace(
+            go.Scatterpolar(
+                r=r_vals_closed,
+                theta=categories_closed,
+                fill="toself",
+                fillcolor=color["fill"],
+                name=item.get("name", f"Run {i+1}"),
+                line=dict(color=color["line"], width=2.5),
+                hoverinfo="name+theta+r",
+            )
+        )
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=14)),
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 1.0],
+                tickvals=[0.2, 0.4, 0.6, 0.8, 1.0],
+                ticktext=["0.2", "0.4", "0.6", "0.8 (Target)", "1.0"],
+                gridcolor="rgba(128, 128, 128, 0.2)",
+            ),
+            angularaxis=dict(
+                gridcolor="rgba(128, 128, 128, 0.2)",
+                linecolor="rgba(128, 128, 128, 0.3)",
+            ),
+        ),
+        showlegend=True,
+        margin=dict(l=40, r=40, t=40, b=30),
+        height=320,
+    )
+    return fig
+
+
+def create_metric_sparkline_chart(
+    run_labels: list[str],
+    values: list[float | None],
+    metric_name: str,
+    target_threshold: float = 0.80,
+    line_color: str = "#2ecc71",
+):
+    """Generate a clean Plotly sparkline with a target line for individual metric cards."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None
+
+    clean_vals = [v if v is not None else 0.0 for v in values]
+
+    fig = go.Figure()
+
+    # Target line
+    fig.add_hline(
+        y=target_threshold,
+        line_dash="dot",
+        line_color="rgba(128, 128, 128, 0.5)",
+        annotation_text=f"Target ({target_threshold})",
+        annotation_position="bottom right",
+        annotation_font_size=9,
+    )
+
+    # Historical trend line with filled gradient
+    fig.add_trace(
+        go.Scatter(
+            x=run_labels,
+            y=clean_vals,
+            mode="lines+markers",
+            name=metric_name,
+            line=dict(color=line_color, width=2.5),
+            marker=dict(size=6, color=line_color),
+            fill="tozeroy",
+            fillcolor=f"rgba{tuple(list(bytes.fromhex(line_color.lstrip('#'))) + [0.12])}" if line_color.startswith("#") else "rgba(46, 204, 113, 0.12)",
+            hovertemplate="<b>%{x}</b><br>Score: %{y:.3f}<extra></extra>",
+        )
+    )
+
+    fig.update_layout(
+        height=130,
+        margin=dict(l=10, r=10, t=10, b=15),
+        yaxis=dict(range=[0, 1.05], tickvals=[0, 0.5, 1.0], gridcolor="rgba(128, 128, 128, 0.15)"),
+        xaxis=dict(showgrid=False, tickfont=dict(size=9)),
+        showlegend=False,
+    )
+    return fig
+
+

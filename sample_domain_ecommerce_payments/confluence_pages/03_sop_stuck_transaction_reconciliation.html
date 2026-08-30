@@ -1,0 +1,67 @@
+<p><strong>Standard Operating Procedure:</strong> Financial Reconciliation &amp; Settlement Replay<br />
+<strong>SOP Code:</strong> SOP-FIN-2026-08<br />
+<strong>Applicability:</strong> Operations, Tier 2 Support, Payments Engineering<br />
+<strong>Effective Date:</strong> 2026-08-30</p>
+
+<ac:structured-macro ac:name="info">
+  <ac:parameter ac:name="title">SOP Purpose</ac:parameter>
+  <ac:rich-text-body>
+    <p>This SOP details the standard operating procedure for handling ledger imbalances, stuck transactions in <code>PENDING_CAPTURE</code> or <code>AUTHORIZED_UNCLAIMED</code> status, and replaying dead-letter settlement queues.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h2>1. Daily Reconciliation Criteria</h2>
+<p>Reconciliation runs automatically at 04:00 UTC comparing external gateway ledger files (Stripe Settlement Reports, Adyen Day-End Settlement) with internal Postgres <code>ledger_transactions</code> table.</p>
+
+<p><strong>Incident Trigger Thresholds:</strong></p>
+<ul>
+  <li><strong>Variance Threshold:</strong> Any total absolute difference &gt; $50.00 USD generates a P2 Alert.</li>
+  <li><strong>Unsettled Orders:</strong> More than 10 orders in <code>PENDING_CAPTURE</code> older than 6 hours triggers on-call escalation.</li>
+</ul>
+
+<hr />
+
+<h2>2. Diagnostic Checklist</h2>
+<ol>
+  <li><strong>Query Unreconciled Records:</strong>
+    <pre><code>SELECT order_id, gateway_reference, amount, currency, status, created_at
+FROM ledger_transactions
+WHERE reconciliation_status = 'MISMATCH' AND date(created_at) = CURRENT_DATE - 1;</code></pre>
+  </li>
+  <li><strong>Classify the Mismatch Reason:</strong>
+    <ul>
+      <li><code>STATUS_DESYNC</code>: Gateway recorded <code>captured</code>, internal DB shows <code>pending</code> (lost webhook).</li>
+      <li><code>AMOUNT_ROUNDING_ERROR</code>: Multi-currency conversion precision mismatch (e.g. JPY or EUR sub-cent rounding).</li>
+      <li><code>FEE_DEDUCTION_UNTRACKED</code>: Payment processor interchange fee not accounted in net ledger entry.</li>
+    </ul>
+  </li>
+</ol>
+
+<hr />
+
+<h2>3. Step-by-Step Remediation Procedure</h2>
+
+<h3>Scenario A: Lost Webhooks &amp; Status Desync</h3>
+<p>When the gateway successfully charged the customer but the internal order remained in <code>PENDING_CAPTURE</code>:</p>
+<ol>
+  <li>Run the automated ledger auto-healer script in dry-run mode:
+    <pre><code>python -m services.reconciliation.sync_tool --mode dry-run --date 2026-08-30</code></pre>
+  </li>
+  <li>Review the dry-run output log at <code>/var/log/payments/reconciliation_dry_run.log</code>.</li>
+  <li>Execute live settlement sync:
+    <pre><code>python -m services.reconciliation.sync_tool --mode live --date 2026-08-30 --confirm-ledger-patch</code></pre>
+  </li>
+  <li>Trigger asynchronous invoice generation for updated orders:
+    <pre><code>curl -X POST https://api.internal.shop/v1/invoices/batch-generate -H "Authorization: Bearer $FIN_SERVICE_TOKEN" -d '{"date": "2026-08-30"}'</code></pre>
+  </li>
+</ol>
+
+<h3>Scenario B: Multi-Currency Rounding Mismatch</h3>
+<p>If discrepancy is under $0.05 per order due to floating-point truncation:</p>
+<ol>
+  <li>Route discrepancy to the Currency Rounding Expense account (Account ID: <code>ACCNT-9902-ROUNDING</code>).</li>
+  <li>Mark reconciliation state as <code>AUTO_ROUNDED_RESOLVED</code>.</li>
+</ol>
+

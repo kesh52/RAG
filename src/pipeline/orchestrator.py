@@ -8,6 +8,11 @@ from src.utils.config import config
 from src.embeddings.vertex import VertexEmbeddingService
 from src.retrieval.postgres import PostgresRetriever
 from src.reranking.vertex import VertexReranker
+from src.pipeline.prompts import (
+    DEFAULT_STANDARD_PROMPT,
+    DEFAULT_ATTACHED_REPORT_PROMPT,
+    format_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +34,7 @@ class RAGPipeline:
         self.generator_client = generator_client
         self.generator_model = generator_model
 
-    def retrieve_and_generate(
+    def prepare_retrieval_and_prompt(
         self,
         query: str,
         use_hybrid: bool = True,
@@ -39,9 +44,10 @@ class RAGPipeline:
         attached_file_bytes: bytes | None = None,
         attached_filename: str | None = None,
         attached_mime_type: str | None = None,
-    ) -> dict:
-        """End-to-end RAG pipeline supporting dynamic feature toggles and multimodal document attachments."""
-        logger.info(f"Initiating RAG pipeline execution for query: '{query}' (attached file: {attached_filename})")
+        prompt_template: str | None = None,
+    ) -> tuple[list[dict], list[str], any]:
+        """Performs retrieval, reranking, and formats the multimodal LLM generation prompt."""
+        logger.info(f"Initiating RAG retrieval & prompt preparation for query: '{query}' (attached file: {attached_filename})")
 
         # 1. Prepare search query (augment with attached text if plain text / log file)
         search_query = query
@@ -86,8 +92,13 @@ class RAGPipeline:
             logger.debug("Semantic reranking is disabled; using top candidates directly")
             retrieved_contexts = candidates[:final_top_k]
 
-        # 5. Stage 3: Answer Generation
-        logger.debug(f"Generating response using model '{self.generator_model}' with {len(retrieved_contexts)} context chunks...")
+        # Extract unique source URLs (prioritizing direct image/PDF file links over parent page URL)
+        sources = []
+        for doc in retrieved_contexts:
+            metadata = doc.get("metadata") or {}
+            url = metadata.get("image_url") or metadata.get("pdf_url") or metadata.get("source_url")
+            if url and url not in sources:
+                sources.append(url)
 
         # Build context blocks with source prefixing
         context_parts = []
@@ -97,100 +108,128 @@ class RAGPipeline:
             context_parts.append(f"[Source: {url}]\n{doc['content']}")
         context_block = "\n\n".join(context_parts)
 
-        # Format prompt according to whether an attachment (report/PDF) was provided
-        if attached_file_bytes and mime_type and mime_type != "application/octet-stream":
-            prompt_instruction = f"""Internal Runbooks & Knowledge Base Context:
-{context_block}
-
-User Request: {query}
-
-You are an expert technical remediation specialist.
-Analyze the attached report/document alongside the internal runbooks provided above.
-Strictly structure your response into the following clear sections with these exact Markdown headers:
-
-### 1. 📌 Issue Diagnosis & Summary
-Briefly summarize the key findings, error codes, or vulnerabilities identified in the attached report.
-
-### 2. 📚 Internal Runbook Guidance (Verified from Company Documentation)
-Provide the explicit operational steps, configuration parameters, and policies directly supported by the internal context above. Every statement or step in this section MUST be grounded in the internal documentation. Inline cite the internal source URLs like `[Source: URL]`.
-
-### 3. 🌐 General Industry Best Practices (General LLM Knowledge)
-Provide complementary technical explanations, industry standards, or architectural advice that are NOT explicitly mentioned in the internal documentation. Clearly mark them as general knowledge.
-
-### 4. ✅ Verification & Prevention
-Explain how to verify the resolution succeeded and prevent recurrence.
-
-At the very end of your response, record any missing internal documentation strictly inside these tags:
-<!-- DOCUMENTATION_GAPS -->
-Explain what runbooks, policies, or topics are missing from the internal knowledge base for this request (or write NONE if fully covered).
-<!-- END_DOCUMENTATION_GAPS -->"""
+        # Format prompt according to whether an attachment (report/PDF) was provided and template override
+        if attached_file_bytes:
+            if not mime_type:
+                mime_type = "application/pdf"
+            template_to_use = prompt_template
+            if not template_to_use:
+                dynamic_attached_tpl = config.get_dynamic("pipeline.attached_prompt_template")
+                template_to_use = dynamic_attached_tpl if dynamic_attached_tpl else DEFAULT_ATTACHED_REPORT_PROMPT
+            prompt_instruction = format_prompt(template_to_use, context_block, query)
 
             llm_contents = [
                 genai_types.Part.from_bytes(data=attached_file_bytes, mime_type=mime_type),
                 prompt_instruction,
             ]
         else:
-            prompt = f"""Internal Knowledge Base Context:
-{context_block}
+            template_to_use = prompt_template
+            if not template_to_use:
+                dynamic_tpl = config.get_dynamic("pipeline.prompt_template")
+                template_to_use = dynamic_tpl if dynamic_tpl else DEFAULT_STANDARD_PROMPT
+            llm_contents = format_prompt(template_to_use, context_block, query)
 
-Question: {query}
+        return retrieved_contexts, sources, llm_contents
 
-Answer the question clearly and distinguish between internal documentation and general knowledge using these exact headers:
-
-### 📚 Internal Documentation Guidance (Verified from Company Docs)
-Directly answer based on the internal context provided above. Only include facts that exist in the internal context, and inline cite the source URLs like `[Source: URL]`.
-
-### 🌐 General Knowledge & Context (General LLM Knowledge)
-Provide helpful supplementary technical explanation, industry background, or standard best practices if relevant, clearly marked as general knowledge.
-
-At the very end of your response, record any missing internal documentation strictly inside these tags:
-<!-- DOCUMENTATION_GAPS -->
-Explain what runbooks, policies, or topics are missing from the internal knowledge base for this question (or write NONE if fully covered).
-<!-- END_DOCUMENTATION_GAPS -->"""
-            llm_contents = prompt
-
-        gen_res = self.generator_client.models.generate_content(
-            model=self.generator_model,
-            contents=llm_contents,
-        )
-
-        # Extract unique source URLs (prioritizing direct image/PDF file links over parent page URL)
-        sources = []
-        for doc in retrieved_contexts:
-            metadata = doc.get("metadata") or {}
-            url = metadata.get("image_url") or metadata.get("pdf_url") or metadata.get("source_url")
-            if url and url not in sources:
-                sources.append(url)
-
-        # Extract and parse documentation gaps silently from the generated text
+    def parse_response_text(self, raw_text: str, sources: list[str]) -> tuple[str, str | None]:
+        """Parses generated text to extract documentation gaps tags and append sources footer."""
         import re
-        raw_text = gen_res.text.strip()
+
+        text = (raw_text or "").strip()
         documentation_gaps = None
 
         gaps_pattern = r"<!--\s*DOCUMENTATION_GAPS\s*-->([\s\S]*?)<!--\s*END_DOCUMENTATION_GAPS\s*-->"
-        gaps_match = re.search(gaps_pattern, raw_text, re.IGNORECASE)
+        gaps_match = re.search(gaps_pattern, text, re.IGNORECASE)
         if gaps_match:
             gaps_content = gaps_match.group(1).strip()
-            raw_text = re.sub(gaps_pattern, "", raw_text, flags=re.IGNORECASE).strip()
+            text = re.sub(gaps_pattern, "", text, flags=re.IGNORECASE).strip()
             if gaps_content and not gaps_content.lower().startswith("none"):
                 documentation_gaps = gaps_content
 
         # Also strip any legacy inline gap headers from user response if generated
         legacy_gap_pattern = r"(?:###\s*(?:\d+\.\s*)?⚠️\s*Internal Documentation Gaps[\s\S]*?)(?=(?:###|\Z))"
-        legacy_match = re.search(legacy_gap_pattern, raw_text, re.IGNORECASE)
+        legacy_match = re.search(legacy_gap_pattern, text, re.IGNORECASE)
         if legacy_match:
             legacy_block = legacy_match.group(0).strip()
             legacy_body = re.sub(r"^###\s*(?:\d+\.\s*)?⚠️\s*Internal Documentation Gaps\s*", "", legacy_block, flags=re.IGNORECASE).strip()
-            raw_text = raw_text.replace(legacy_block, "").strip()
+            text = text.replace(legacy_block, "").strip()
             if legacy_body and not legacy_body.lower().startswith("none") and not documentation_gaps:
                 documentation_gaps = legacy_body
 
-        # Append reference links footer to the final response text
-        response_text = raw_text
-        if sources:
+        # Append reference links footer to the final response text if sources exist
+        if sources and "Sources:" not in text:
             sources_footer = "\n\nSources:\n" + "\n".join(f"- {src}" for src in sources)
-            response_text += sources_footer
+            text += sources_footer
 
+        return text, documentation_gaps
+
+    def retrieve_and_generate_stream(
+        self,
+        query: str,
+        use_hybrid: bool = True,
+        use_reranker: bool = True,
+        pool_size: int = 5,
+        final_top_k: int = 2,
+        attached_file_bytes: bytes | None = None,
+        attached_filename: str | None = None,
+        attached_mime_type: str | None = None,
+        model_name: str | None = None,
+        prompt_template: str | None = None,
+    ):
+        """Retrieves contexts and returns a streaming generator from Gemini along with metadata."""
+        retrieved_contexts, sources, llm_contents = self.prepare_retrieval_and_prompt(
+            query=query,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+            pool_size=pool_size,
+            final_top_k=final_top_k,
+            attached_file_bytes=attached_file_bytes,
+            attached_filename=attached_filename,
+            attached_mime_type=attached_mime_type,
+            prompt_template=prompt_template,
+        )
+        gen_model = model_name or self.generator_model
+        logger.debug(f"Streaming response using model '{gen_model}' with {len(retrieved_contexts)} context chunks...")
+        stream_res = self.generator_client.models.generate_content_stream(
+            model=gen_model,
+            contents=llm_contents,
+        )
+        return stream_res, retrieved_contexts, sources
+
+    def retrieve_and_generate(
+        self,
+        query: str,
+        use_hybrid: bool = True,
+        use_reranker: bool = True,
+        pool_size: int = 5,
+        final_top_k: int = 2,
+        attached_file_bytes: bytes | None = None,
+        attached_filename: str | None = None,
+        attached_mime_type: str | None = None,
+        model_name: str | None = None,
+        prompt_template: str | None = None,
+    ) -> dict:
+        """End-to-end RAG pipeline supporting dynamic feature toggles and multimodal document attachments."""
+        retrieved_contexts, sources, llm_contents = self.prepare_retrieval_and_prompt(
+            query=query,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+            pool_size=pool_size,
+            final_top_k=final_top_k,
+            attached_file_bytes=attached_file_bytes,
+            attached_filename=attached_filename,
+            attached_mime_type=attached_mime_type,
+            prompt_template=prompt_template,
+        )
+
+        gen_model = model_name or self.generator_model
+        logger.debug(f"Generating response using model '{gen_model}' with {len(retrieved_contexts)} context chunks...")
+        gen_res = self.generator_client.models.generate_content(
+            model=gen_model,
+            contents=llm_contents,
+        )
+
+        response_text, documentation_gaps = self.parse_response_text(gen_res.text or "", sources)
         logger.info("RAG pipeline execution completed successfully.")
         return {
             "user_input": query,
@@ -217,13 +256,13 @@ def get_default_pipeline() -> RAGPipeline:
 
     embedding_service = VertexEmbeddingService(
         genai_client, 
-        model_name=config.get("models.embedding", "text-embedding-005")
+        model_name=config.get_dynamic("models.embedding", config.get("models.embedding", "text-embedding-005"))
     )
     retriever = PostgresRetriever(db.get_connection)
     reranker = VertexReranker(
         rank_client, 
         gcp_project, 
-        model_name=config.get("models.rerank", "semantic-ranker-512@latest")
+        model_name=config.get_dynamic("models.rerank", config.get("models.rerank", "semantic-ranker-512@latest"))
     )
 
     return RAGPipeline(
@@ -231,6 +270,6 @@ def get_default_pipeline() -> RAGPipeline:
         retriever=retriever,
         reranker=reranker,
         generator_client=genai_client,
-        generator_model=config.get("models.generation", "gemini-2.5-flash")
+        generator_model=config.get_dynamic("models.generation", config.get("models.generation", "gemini-2.5-flash"))
     )
 

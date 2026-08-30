@@ -2,6 +2,7 @@ import os
 import sys
 import argparse
 import logging
+import asyncio
 from google import genai
 from contextlib import closing
 
@@ -19,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("run_etl")
 
 def main():
-    parser = argparse.ArgumentParser(description="Run the Confluence ETL pipeline on a live page ID or URL.")
+    parser = argparse.ArgumentParser(description="Run the Confluence ETL pipeline on a live page ID or URL with async crawling and batch embedding.")
     parser.add_argument("root_page_id", type=str, help="The Confluence page ID or URL to start crawling from.")
     parser.add_argument("--max-depth", type=int, default=1, help="BFS crawl depth limit (default: 1).")
     parser.add_argument(
@@ -29,6 +30,20 @@ def main():
         default=config.get("pipeline.chunking_strategy", "recursive"),
         choices=["recursive", "semantic"],
         help="Chunking strategy to use: 'recursive' or 'semantic' (default from config: %(default)s).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        "-c",
+        type=int,
+        default=int(config.get("crawler.max_concurrency", 5)),
+        help="Maximum concurrent page and asset requests (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        "-b",
+        type=int,
+        default=int(config.get("crawler.batch_size", 20)),
+        help="Vector embedding batch size (default: %(default)s).",
     )
     args = parser.parse_args()
 
@@ -63,10 +78,12 @@ def main():
     pipeline = ConfluenceETLPipeline(
         confluence_client=client,
         chunker=chunker,
-        embedding_service=embedding_service
+        embedding_service=embedding_service,
+        batch_size=args.batch_size,
+        max_concurrency=args.concurrency,
     )
 
-    logger.info(f"Running ingestion starting from Confluence target: {args.root_page_id}...")
+    logger.info(f"Running async ingestion starting from Confluence target: {args.root_page_id} (concurrency: {args.concurrency}, batch size: {args.batch_size})...")
     try:
         chunks_inserted = pipeline.run(root_identifier=args.root_page_id, max_depth=args.max_depth)
         logger.info(f"SUCCESS: Ingestion finished! Inserted {chunks_inserted} vector chunks into the database.")
@@ -76,4 +93,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

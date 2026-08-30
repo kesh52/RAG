@@ -143,7 +143,7 @@ def render_etl_tab():
                             try:
                                 from src.etl.confluence import APIConfluenceClient
                                 client = APIConfluenceClient(domain=domain, username=username, api_token=api_token)
-                                page_info = client.fetch_page_details(conf_test_target.strip())
+                                page_info = client.fetch_page_details_sync(conf_test_target.strip())
                                 st.session_state["confluence_doc_content"] = page_info["text"]
                                 st.session_state["fetched_conf_title"] = page_info["title"]
                                 st.success(f"✅ Successfully loaded Confluence Page: **'{page_info['title']}'** ({len(page_info['text'])} chars)")

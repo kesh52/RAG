@@ -1,0 +1,100 @@
+<p><strong>Service Name:</strong> Payment Gateway Integration &amp; Processing Engine<br />
+<strong>Service Tier:</strong> Tier 1 (Mission Critical)<br />
+<strong>Document Owner:</strong> Payments Platform SRE Team<br />
+<strong>Last Updated:</strong> 2026-08-30</p>
+
+<ac:structured-macro ac:name="info">
+  <ac:parameter ac:name="title">Payment Gateway Overview</ac:parameter>
+  <ac:rich-text-body>
+    <p>This runbook outlines the operational architecture, error code catalog, and remediation procedures for the Checkout Payment Gateway Service integrating Stripe, Adyen, and PayPal.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h2>1. Core Architecture &amp; Lifecycle</h2>
+<p>The Payment Gateway Service manages two-phase commit transactions for all customer checkouts:</p>
+<ol>
+  <li><strong>Authorize Phase:</strong> Holds funds against the customer payment method and receives a temporary <code>payment_intent_token</code> (TTL: 15 minutes).</li>
+  <li><strong>Capture Phase:</strong> Executed upon order validation and warehouse inventory reservation confirmation.</li>
+  <li><strong>Webhook Callback:</strong> Asynchronous notification from payment providers delivering final settlement confirmation (<code>charge.succeeded</code>, <code>payment_intent.payment_failed</code>).</li>
+</ol>
+
+<hr />
+
+<h2>2. Error Code Catalog &amp; Root Causes</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Error Code</th>
+      <th>Severity</th>
+      <th>Trigger Condition</th>
+      <th>Root Cause</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ERR_PAYMENT_304_AUTH_EXPIRED</code></td>
+      <td><strong>CRITICAL</strong></td>
+      <td>Payment Intent token expired before capture call completed (&gt; 15 mins).</td>
+      <td>Worker queue latency or downstream inventory locking delay caused capture to be delayed beyond token TTL.</td>
+    </tr>
+    <tr>
+      <td><code>ERR_GATEWAY_502_TIMEOUT</code></td>
+      <td><strong>HIGH</strong></td>
+      <td>Upstream payment provider did not respond within 5000ms.</td>
+      <td>Provider API degradation or egress network firewall packet drop.</td>
+    </tr>
+    <tr>
+      <td><code>ERR_IDEMPOTENCY_COLLISION</code></td>
+      <td><strong>MEDIUM</strong></td>
+      <td>Duplicate request with identical <code>Idempotency-Key</code> header within 60s.</td>
+      <td>Aggressive client-side UI double-click or network retry loop without backoff.</td>
+    </tr>
+    <tr>
+      <td><code>ERR_WEBHOOK_SIGNATURE_MISMATCH</code></td>
+      <td><strong>CRITICAL</strong></td>
+      <td>HMAC-SHA256 signature verification failed on incoming provider webhook.</td>
+      <td>Webhook signing secret was rotated in provider dashboard but not updated in HashiCorp Vault / Kubernetes secret.</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2>3. Remediation &amp; Troubleshooting Procedures</h2>
+
+<h3>3.1 Remediation for <code>ERR_PAYMENT_304_AUTH_EXPIRED</code></h3>
+<ac:structured-macro ac:name="warning">
+  <ac:parameter ac:name="title">Customer Impact Warning</ac:parameter>
+  <ac:rich-text-body>
+    <p>Orders failing with <code>ERR_PAYMENT_304_AUTH_EXPIRED</code> must NOT be re-authorized automatically without verifying that the customer was not double-charged on their bank statement.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<p><strong>Standard Recovery Steps:</strong></p>
+<ol>
+  <li><strong>Verify Payment Intent Status:</strong> Execute the gateway verification CLI:
+    <pre><code>python -m services.payments.cli verify-intent --intent-id &lt;INTENT_ID&gt;</code></pre>
+  </li>
+  <li><strong>Release Stuck Inventory:</strong> If status is <code>canceled_expired</code>, call the inventory unreserve endpoint:
+    <pre><code>curl -X POST https://api.internal.shop/v1/inventory/unreserve -d '{"order_id": "&lt;ORDER_ID&gt;"}'</code></pre>
+  </li>
+  <li><strong>Send Customer Notification:</strong> Trigger the payment recovery email template <code>TPL_PAYMENT_SESSION_EXPIRED</code> prompting the customer to refresh their checkout session.</li>
+  <li><strong>Drain and Rebalance Worker Queue:</strong> Scale payment worker pods to clear delayed message lag:
+    <pre><code>kubectl scale deployment/payment-worker --replicas=8 -n payments</code></pre>
+  </li>
+</ol>
+
+<h3>3.2 Remediation for <code>ERR_WEBHOOK_SIGNATURE_MISMATCH</code></h3>
+<ol>
+  <li>Retrieve the latest signing secret from the Stripe/Adyen dashboard.</li>
+  <li>Update secret in Vault:
+    <pre><code>vault kv put secret/payments/webhook_secret STRIPE_SECRET="whsec_live_..."</code></pre>
+  </li>
+  <li>Restart the webhook ingress pods:
+    <pre><code>kubectl rollout restart deployment/payment-webhook-ingress -n payments</code></pre>
+  </li>
+  <li>Replay dropped events from the provider dashboard event replay queue.</li>
+</ol>
+

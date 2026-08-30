@@ -81,13 +81,15 @@ def load_dataset(name: str) -> list[dict]:
 
 def run_pipeline_evaluation(
     pipeline: RAGPipeline,
-    use_hybrid: bool,
-    use_reranker: bool,
-    label: str,
+    use_hybrid: bool = True,
+    use_reranker: bool = True,
+    label: str = "Evaluation Run",
     benchmark_cases: list[dict] | None = None,
+    cases: list[dict] | None = None,
     pool_size: int = 5,
     final_top_k: int = 2,
     progress_callback=None,
+    prompt_template: str | None = None,
 ):
     """Run evaluation and return structured results.
 
@@ -97,18 +99,23 @@ def run_pipeline_evaluation(
         use_reranker: Whether to enable semantic reranking.
         label: Human-readable label for this evaluation run.
         benchmark_cases: List of query/reference dicts. Defaults to DEFAULT_BENCHMARK_CASES.
+        cases: Alias for benchmark_cases.
         pool_size: Number of Stage 1 candidates to retrieve.
         final_top_k: Number of final context chunks for the LLM.
         progress_callback: Optional callable(current, total, message) for progress updates.
+        prompt_template: Optional custom prompt template or preset text.
 
     Returns:
         dict with keys:
             - "label": the run label
             - "dataframe": pandas DataFrame with per-question metrics
-            - "aggregated": dict of averaged metric values
+            - "aggregated": dict of averaged metric values (e.g. avg_faithfulness)
+            - "aggregated_scores": dict with keys (faithfulness, answer_relevancy, etc.)
+            - "detailed_results": list of per-question metric dicts
     """
-    if benchmark_cases is None:
-        benchmark_cases = DEFAULT_BENCHMARK_CASES
+    target_cases = cases if cases is not None else benchmark_cases
+    if target_cases is None:
+        target_cases = DEFAULT_BENCHMARK_CASES
 
     print(f"\n==================================================")
     print(f"Running Evaluation for: {label}")
@@ -121,8 +128,8 @@ def run_pipeline_evaluation(
         "reference": [],
     }
 
-    total = len(benchmark_cases)
-    for i, item in enumerate(benchmark_cases):
+    total = len(target_cases)
+    for i, item in enumerate(target_cases):
         msg = f"Querying pipeline for: '{item['query']}'..."
         print(msg)
         if progress_callback:
@@ -134,6 +141,7 @@ def run_pipeline_evaluation(
             use_reranker=use_reranker,
             pool_size=pool_size,
             final_top_k=final_top_k,
+            prompt_template=prompt_template,
         )
 
         eval_data["user_input"].append(pipeline_output["user_input"])
@@ -170,16 +178,24 @@ def run_pipeline_evaluation(
     # Compute aggregated metrics
     metric_cols = ["faithfulness", "answer_relevancy", "context_precision", "context_recall"]
     aggregated = {}
+    aggregated_scores = {}
     for col in metric_cols:
         if col in df.columns:
-            aggregated[f"avg_{col}"] = float(df[col].mean())
+            val = float(df[col].mean())
+            aggregated[f"avg_{col}"] = val
+            aggregated_scores[col] = val
         else:
             aggregated[f"avg_{col}"] = None
+            aggregated_scores[col] = None
+
+    detailed_results = df.to_dict(orient="records")
 
     return {
         "label": label,
         "dataframe": df,
         "aggregated": aggregated,
+        "aggregated_scores": aggregated_scores,
+        "detailed_results": detailed_results,
     }
 
 

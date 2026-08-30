@@ -1,4 +1,4 @@
-"""Tab 4: Interactive Playground, Report Attachments & Feedback Curation."""
+"""Tab 3: Interactive Playground, Report Attachments & Feedback Curation."""
 
 import os
 import re
@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.utils.config import config
 from src.ui.helpers import _render_attachment_preview
+from src.pipeline.prompts import PROMPT_PRESETS, get_prompt_preset, list_prompt_presets
 
 
 def render_playground_tab():
@@ -52,6 +53,39 @@ def render_playground_tab():
                     }
                     st.json(file_details)
 
+            # Configurable Generation Prompt Section
+            with st.expander("⚙️ Generation Prompt & Grounding Strategy", expanded=False):
+                st.caption("Customize the system persona, grounding strictness, and response format. Use `{context}` and `{query}` placeholders.")
+                col_pr_preset, col_pr_reset = st.columns([3, 1])
+                with col_pr_preset:
+                    preset_options = list_prompt_presets() + ["Custom Template"]
+                    selected_preset = st.selectbox(
+                        "Prompt Preset",
+                        options=preset_options,
+                        index=0,
+                        key="play_prompt_preset_sel",
+                    )
+                with col_pr_reset:
+                    st.write("")
+                    st.write("")
+                    if st.button("🔄 Reset Prompt", key="btn_reset_play_prompt"):
+                        if selected_preset in PROMPT_PRESETS:
+                            st.session_state["play_custom_prompt_text"] = PROMPT_PRESETS[selected_preset]
+                            st.rerun()
+
+                # Initialize default in session_state if needed
+                if "play_custom_prompt_text" not in st.session_state or st.session_state.get("last_play_preset") != selected_preset:
+                    st.session_state["last_play_preset"] = selected_preset
+                    if selected_preset in PROMPT_PRESETS:
+                        st.session_state["play_custom_prompt_text"] = PROMPT_PRESETS[selected_preset]
+
+                active_prompt_template = st.text_area(
+                    "Prompt Template (`{context}`, `{query}`)",
+                    value=st.session_state.get("play_custom_prompt_text", PROMPT_PRESETS["Structured Multi-Section (Default)"]),
+                    height=180,
+                    key="play_custom_prompt_text",
+                )
+
         with col_q_opts:
             st.markdown("**Pipeline Configuration**")
             play_use_hybrid = st.toggle("Hybrid Search", value=True, key="play_hybrid")
@@ -73,125 +107,130 @@ def render_playground_tab():
             if not user_question.strip() and uploaded_file is None:
                 st.error("Please enter a question or upload a document report.")
             else:
-                with st.spinner("Processing query through RAG pipeline..."):
-                    from src.pipeline import get_default_pipeline
+                from src.pipeline import get_default_pipeline
 
-                    pipeline = get_default_pipeline()
+                pipeline = get_default_pipeline()
 
-                    # Extract text content from attachment if present
-                    attached_text = ""
-                    raw_attachment_bytes = None
-                    attachment_mime = None
-                    if uploaded_file is not None:
-                        try:
-                            raw_attachment_bytes = uploaded_file.getvalue()
-                            attachment_mime = uploaded_file.type
-                            fn_lower = uploaded_file.name.lower()
-
-                            if fn_lower.endswith(".pdf"):
-                                try:
-                                    import pypdf
-                                    from io import BytesIO
-                                    reader = pypdf.PdfReader(BytesIO(raw_attachment_bytes))
-                                    pdf_pages_text = [page.extract_text() for page in reader.pages if page.extract_text()]
-                                    attached_text = "\n\n".join(pdf_pages_text)
-                                except Exception as pdf_err:
-                                    attached_text = f"[PDF Parsing Notice: {pdf_err}]"
-                            elif fn_lower.endswith((".txt", ".log", ".json", ".md")):
-                                attached_text = raw_attachment_bytes.decode("utf-8", errors="ignore")
-                            elif fn_lower.endswith((".png", ".jpg", ".jpeg")):
-                                attached_text = f"[Attached Image: {uploaded_file.name} ({uploaded_file.size} bytes)]"
-                            else:
-                                attached_text = f"[Attached File: {uploaded_file.name}]"
-                        except Exception as parse_err:
-                            st.warning(f"Could not extract text from attachment: {parse_err}")
-
-                    # Compose full augmented query
-                    augmented_query = user_question.strip()
-                    if attached_text:
-                        if augmented_query:
-                            augmented_query = f"{augmented_query}\n\n--- Attached Report Content ({uploaded_file.name}) ---\n{attached_text}"
-                        else:
-                            augmented_query = f"Please analyze and propose remediation for the following attached report:\n\n--- Attached Report Content ({uploaded_file.name}) ---\n{attached_text}"
-
-                    t0 = time.time()
+                # Extract text content from attachment if present
+                attached_text = ""
+                raw_attachment_bytes = None
+                attachment_mime = None
+                if uploaded_file is not None:
                     try:
-                        resp_obj = pipeline.query(
-                            query_text=augmented_query,
+                        raw_attachment_bytes = uploaded_file.getvalue()
+                        attachment_mime = uploaded_file.type
+                        fn_lower = uploaded_file.name.lower()
+
+                        if fn_lower.endswith(".pdf"):
+                            try:
+                                import pypdf
+                                from io import BytesIO
+                                reader = pypdf.PdfReader(BytesIO(raw_attachment_bytes))
+                                pdf_pages_text = [page.extract_text() for page in reader.pages if page.extract_text()]
+                                attached_text = "\n\n".join(pdf_pages_text)
+                            except Exception as pdf_err:
+                                attached_text = f"[PDF Parsing Notice: {pdf_err}]"
+                        elif fn_lower.endswith((".txt", ".log", ".json", ".md")):
+                            attached_text = raw_attachment_bytes.decode("utf-8", errors="ignore")
+                        elif fn_lower.endswith((".png", ".jpg", ".jpeg")):
+                            attached_text = f"[Attached Image: {uploaded_file.name} ({uploaded_file.size} bytes)]"
+                        else:
+                            attached_text = f"[Attached File: {uploaded_file.name}]"
+                    except Exception as parse_err:
+                        st.warning(f"Could not extract text from attachment: {parse_err}")
+
+                # Compose full augmented query
+                augmented_query = user_question.strip()
+                if attached_text:
+                    if augmented_query:
+                        augmented_query = f"{augmented_query}\n\n--- Attached Report Content ({uploaded_file.name}) ---\n{attached_text}"
+                    else:
+                        augmented_query = f"Please analyze and propose remediation for the following attached report:\n\n--- Attached Report Content ({uploaded_file.name}) ---\n{attached_text}"
+
+                t0 = time.time()
+                try:
+                    with st.spinner("🔍 Retrieving knowledge base runbooks & ranking contexts..."):
+                        stream_res, retrieved_docs, sources = pipeline.retrieve_and_generate_stream(
+                            query=augmented_query,
                             use_hybrid=play_use_hybrid,
                             use_reranker=play_use_reranker,
                             pool_size=play_pool_size,
                             final_top_k=play_top_k,
+                            attached_file_bytes=raw_attachment_bytes,
+                            attached_filename=uploaded_file.name if uploaded_file is not None else None,
+                            attached_mime_type=attachment_mime,
                             model_name=play_model,
+                            prompt_template=active_prompt_template,
                         )
-                        latency = int((time.time() - t0) * 1000)
 
-                        # Extract structured documentation gaps from response
-                        raw_response_text = resp_obj.response
-                        extracted_gaps = None
+                    st.divider()
+                    st.subheader("💡 Pipeline Response")
 
-                        # Pattern 1: HTML Comment delimiter <!-- DOCUMENTATION_GAPS --> ... <!-- END_DOCUMENTATION_GAPS -->
-                        gap_html_match = re.search(
-                            r"<!--\s*DOCUMENTATION_GAPS\s*-->([\s\S]*?)<!--\s*END_DOCUMENTATION_GAPS\s*-->",
-                            raw_response_text,
-                            re.IGNORECASE,
+                    # Inline Preview for Attached Document (if present)
+                    if uploaded_file is not None and raw_attachment_bytes:
+                        _render_attachment_preview(
+                            filename=uploaded_file.name,
+                            data=raw_attachment_bytes,
+                            mime_type=attachment_mime,
+                            label=f"👁️ Preview Attached Document ({uploaded_file.name})",
+                            key_prefix="play_stream_preview",
                         )
-                        if gap_html_match:
-                            gaps_content = gap_html_match.group(1).strip()
-                            if gaps_content and not gaps_content.lower().startswith("none"):
-                                extracted_gaps = gaps_content
 
-                        # Pattern 2: Markdown Section ### ⚠️ Internal Documentation Gaps or ### 3. Internal Documentation Gaps
-                        if not extracted_gaps:
-                            gap_md_match = re.search(
-                                r"(?:###\s*(?:\d+\.\s*)?⚠️\s*Internal Documentation Gaps[\s\S]*?)(?=(?:###|\Z))",
-                                raw_response_text,
-                                re.IGNORECASE,
-                            )
-                            if gap_md_match:
-                                gap_block = gap_md_match.group(0).strip()
-                                # Clean off the header itself
-                                cleaned_gap = re.sub(r"^###\s*(?:\d+\.\s*)?⚠️\s*Internal Documentation Gaps\s*", "", gap_block, flags=re.IGNORECASE).strip()
-                                if cleaned_gap and not cleaned_gap.lower().startswith("none"):
-                                    extracted_gaps = cleaned_gap
+                    def text_stream_iter():
+                        for chunk in stream_res:
+                            chunk_text = chunk.text or ""
+                            if chunk_text:
+                                yield chunk_text
 
-                        st.session_state["play_last_result"] = {
-                            "query": user_question.strip() if user_question.strip() else f"Analyze attached: {uploaded_file.name}",
-                            "response": resp_obj.response,
-                            "retrieved_contexts": [c.text for c in resp_obj.retrieved_chunks],
-                            "sources": resp_obj.sources,
-                            "use_hybrid": play_use_hybrid,
-                            "use_reranker": play_use_reranker,
-                            "pool_size": play_pool_size,
-                            "final_top_k": play_top_k,
-                            "generation_model": play_model,
-                            "latency_ms": latency,
-                            "attached_filename": uploaded_file.name if uploaded_file is not None else None,
-                            "attached_file_bytes": raw_attachment_bytes,
-                            "attached_file_mime": attachment_mime,
-                            "documentation_gaps": extracted_gaps,
-                        }
-                    except Exception as e:
-                        st.error(f"Pipeline execution failed: {e}")
+                    # Stream LLM generation in real-time
+                    streamed_raw_text = st.write_stream(text_stream_iter())
+                    latency = int((time.time() - t0) * 1000)
+
+                    # Extract structured documentation gaps & finalize text
+                    final_text, extracted_gaps = pipeline.parse_response_text(streamed_raw_text, sources)
+
+                    st.session_state["play_last_result"] = {
+                        "query": user_question.strip() if user_question.strip() else f"Analyze attached: {uploaded_file.name}",
+                        "response": final_text,
+                        "retrieved_contexts": [doc["content"] if isinstance(doc, dict) else str(doc) for doc in retrieved_docs],
+                        "sources": sources,
+                        "use_hybrid": play_use_hybrid,
+                        "use_reranker": play_use_reranker,
+                        "pool_size": play_pool_size,
+                        "final_top_k": play_top_k,
+                        "generation_model": play_model,
+                        "prompt_preset": selected_preset,
+                        "prompt_template": active_prompt_template,
+                        "latency_ms": latency,
+                        "attached_filename": uploaded_file.name if uploaded_file is not None else None,
+                        "attached_file_bytes": raw_attachment_bytes,
+                        "attached_file_mime": attachment_mime,
+                        "documentation_gaps": extracted_gaps,
+                    }
+                    st.session_state["just_streamed"] = True
+                except Exception as e:
+                    st.error(f"Pipeline execution failed: {e}")
 
         # Show Output and Feedback Form
         if "play_last_result" in st.session_state:
             res = st.session_state["play_last_result"]
 
-            st.divider()
-            st.subheader("💡 Pipeline Response")
+            # If not just streamed during this click run, render static markdown response & attachment preview
+            if not st.session_state.pop("just_streamed", False):
+                st.divider()
+                st.subheader("💡 Pipeline Response")
 
-            # Inline Preview for Attached Document (if present)
-            if res.get("attached_filename") and res.get("attached_file_bytes"):
-                _render_attachment_preview(
-                    filename=res["attached_filename"],
-                    data=res["attached_file_bytes"],
-                    mime_type=res.get("attached_file_mime"),
-                    label=f"👁️ Preview Attached Document ({res['attached_filename']})",
-                    key_prefix="play_preview",
-                )
+                # Inline Preview for Attached Document (if present)
+                if res.get("attached_filename") and res.get("attached_file_bytes"):
+                    _render_attachment_preview(
+                        filename=res["attached_filename"],
+                        data=res["attached_file_bytes"],
+                        mime_type=res.get("attached_file_mime"),
+                        label=f"👁️ Preview Attached Document ({res['attached_filename']})",
+                        key_prefix="play_preview",
+                    )
 
-            st.markdown(res["response"])
+                st.markdown(res["response"])
 
             # Highlight Knowledge / Documentation Gaps prominently if discovered
             if res.get("documentation_gaps"):
@@ -205,6 +244,7 @@ def render_playground_tab():
             st.caption(
                 f"⏱️ Latency: **{res['latency_ms']} ms** | "
                 f"🤖 Model: `{res['generation_model']}` | "
+                f"📝 Prompt: `{res.get('prompt_preset', 'Default')}` | "
                 f"🔍 Mode: `{'Hybrid' if res['use_hybrid'] else 'Dense'}` + `{'Reranker' if res['use_reranker'] else 'Direct'}` | "
                 f"📎 Attachment: `{res.get('attached_filename') or 'None'}` | "
                 f"📚 Sources: {', '.join(res['sources']) if res['sources'] else 'None'}"

@@ -1,0 +1,80 @@
+<p><strong>Service Name:</strong> Inventory Reservation &amp; Order Lock Engine<br />
+<strong>Service Tier:</strong> Tier 1 (Mission Critical)<br />
+<strong>Document Owner:</strong> Warehouse &amp; Fulfillment SRE Team<br />
+<strong>Last Updated:</strong> 2026-08-30</p>
+
+<ac:structured-macro ac:name="info">
+  <ac:parameter ac:name="title">Inventory Lock Service Overview</ac:parameter>
+  <ac:rich-text-body>
+    <p>This technical guide documents the distributed lock architecture for SKU inventory reservations, deadlocks handling, and Postgres row lock timeout errors during flash-sale traffic spikes.</p>
+  </ac:rich-text-body>
+</ac:structured-macro>
+
+<hr />
+
+<h2>1. Distributed Locking Strategy</h2>
+<p>To prevent overselling stock across distributed worker pods, the Inventory Service uses a two-tier locking strategy:</p>
+<ol>
+  <li><strong>Tier 1: Redis Redlock (Fast-path):</strong> Acquires distributed lock on key <code>lock:sku:{sku_id}</code> with a 3000ms TTL.</li>
+  <li><strong>Tier 2: PostgreSQL Row-Level Lock (Persistence):</strong> Executes <code>SELECT available_qty FROM inventory_items WHERE sku_id = :sku_id FOR UPDATE NOWAIT</code>.</li>
+</ol>
+
+<hr />
+
+<h2>2. Error Directory &amp; Thresholds</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Error Identifier</th>
+      <th>Trigger Mechanism</th>
+      <th>Impact</th>
+      <th>Primary Root Cause</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ERR_STOCK_LOCK_TIMEOUT_504</code></td>
+      <td>Worker failed to acquire Redis Redlock within 3000ms.</td>
+      <td>User checkout aborted with "Item currently held by another buyer".</td>
+      <td>Flash sale traffic congestion causing key contention, or Redis Sentinel replica lag.</td>
+    </tr>
+    <tr>
+      <td><code>ERR_POSTGRES_LOCK_NOWAIT_55P03</code></td>
+      <td>Postgres query aborted due to lock acquisition conflict (SQLState 55P03).</td>
+      <td>Database transaction rollback on order placement.</td>
+      <td>Concurrent batch replenishment import holding exclusive row locks on popular SKUs during checkout peaks.</td>
+    </tr>
+    <tr>
+      <td><code>ERR_INVENTORY_NEGATIVE_BUFFER</code></td>
+      <td>Stock count fell below zero after async reconciliation.</td>
+      <td>Physical warehouse fulfillment shortfall.</td>
+      <td>Duplicate capture events or missing idempotency verification on returns processing.</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr />
+
+<h2>3. Remediation &amp; Recovery Workflow</h2>
+
+<h3>3.1 Resolving <code>ERR_STOCK_LOCK_TIMEOUT_504</code> &amp; Redis Congestion</h3>
+<ol>
+  <li><strong>Inspect Lock Contention Metrics:</strong> Check active lock keys in Redis cluster:
+    <pre><code>redis-cli -h redis-cluster.internal -p 6379 eval "return #redis.call('keys', 'lock:sku:*')" 0</code></pre>
+  </li>
+  <li><strong>Flush Orphaned Locks:</strong> If locks are held with no active worker PID, run the orphan lock purger:
+    <pre><code>python -m services.inventory.cli purge-orphaned-locks --older-than-seconds 30</code></pre>
+  </li>
+  <li><strong>Enable Dynamic Backoff Jitter:</strong> Apply dynamic jitter configuration to distribute lock retry spikes:
+    <pre><code>kubectl set env deployment/inventory-service REDIS_LOCK_RETRY_JITTER_MS=250 -n fulfillment</code></pre>
+  </li>
+</ol>
+
+<h3>3.2 Resolving <code>ERR_POSTGRES_LOCK_NOWAIT_55P03</code></h3>
+<ol>
+  <li>Kill blocking long-running ETL transactions:
+    <pre><code>SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE query ILIKE '%inventory_replenishment%' AND state = 'active' AND now() - query_start &gt; interval '30 seconds';</code></pre>
+  </li>
+  <li>Reschedule warehouse bulk imports to off-peak hours (02:00 AM - 05:00 AM UTC).</li>
+</ol>
+

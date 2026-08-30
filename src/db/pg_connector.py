@@ -1,5 +1,6 @@
 import logging
 import psycopg
+from psycopg_pool import ConnectionPool
 import google.auth
 from google.auth import impersonated_credentials
 from src.utils.config import config
@@ -12,71 +13,158 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-DB_TYPE = config.get("database.type", "cloud_sql")
-DB_HOST = config.get("database.host", "127.0.0.1")
-DB_PORT = config.get("database.port", 5432)
-DB_NAME = config.get("database.name", "vector")
-DB_USER = config.get("database.user", "postgres")
-DB_PASSWORD = config.get("database.password")
-INSTANCE_CONNECTION_NAME = config.get("database.instance_connection_name")
-IMPERSONATE_SA = config.get("database.impersonate_service_account")
-IP_TYPE_STR = config.get("database.ip_type", "public").lower()
-
-# Create a singleton connector instance
+# Singletons for connection pool and Cloud SQL connector
 _CONNECTOR = None
+_POOL: ConnectionPool | None = None
 
-def get_connection():
-    """Acquire and return a new connection to the database."""
-    global _CONNECTOR
-    
-    if DB_TYPE == "cloud_sql":
-        if not INSTANCE_CONNECTION_NAME:
+
+def get_pool() -> ConnectionPool:
+    """Initialize (if necessary) and return the singleton psycopg_pool.ConnectionPool."""
+    global _CONNECTOR, _POOL
+
+    if _POOL is not None and not _POOL.closed:
+        return _POOL
+
+    db_type = config.get("database.type", "cloud_sql")
+    min_pool_size = int(config.get("database.min_pool_size", 1))
+    max_pool_size = int(config.get("database.max_pool_size", 10))
+    pool_timeout = float(config.get("database.pool_timeout", 30.0))
+    max_idle = float(config.get("database.max_idle", 600.0))
+    max_lifetime = float(config.get("database.max_lifetime", 3600.0))
+
+    if db_type == "cloud_sql":
+        instance_connection_name = config.get("database.instance_connection_name")
+        if not instance_connection_name:
             raise ValueError(
                 "database.type is set to 'cloud_sql', but database.instance_connection_name is not configured in config.yaml or environment."
             )
-            
+
         if not _HAS_CONNECTOR:
             raise ImportError(
                 "google-cloud-sql-connector is not installed in the current environment. "
                 "Please run `pip install \"cloud-sql-python-connector[psycopg]\"` to use native Cloud SQL connections."
             )
-            
+
         if _CONNECTOR is None:
             # Resolve custom credentials if service account impersonation is configured
             creds = None
-            if IMPERSONATE_SA:
-                logger.info(f"Setting up credentials impersonating service account: {IMPERSONATE_SA}")
+            impersonate_sa = config.get("database.impersonate_service_account")
+            if impersonate_sa:
+                logger.info(f"Setting up credentials impersonating service account: {impersonate_sa}")
                 base_creds, _ = google.auth.default()
                 creds = impersonated_credentials.Credentials(
                     source_credentials=base_creds,
-                    target_principal=IMPERSONATE_SA,
+                    target_principal=impersonate_sa,
                     target_scopes=["https://www.googleapis.com/auth/sqlservice.admin"]
                 )
-            
+
             logger.info("Initializing Cloud SQL Python Connector...")
             _CONNECTOR = Connector(credentials=creds)
-            
+
         # Map configured IP type to IPTypes enum
-        if IP_TYPE_STR == "private":
+        ip_type_str = config.get("database.ip_type", "public").lower()
+        if ip_type_str == "private":
             ip_type = IPTypes.PRIVATE
             logger.debug("Connecting using Private IP configuration...")
-        elif IP_TYPE_STR == "psc":
+        elif ip_type_str == "psc":
             ip_type = IPTypes.PSC
             logger.debug("Connecting using Private Service Connect (PSC) configuration...")
         else:
             ip_type = IPTypes.PUBLIC
             logger.debug("Connecting using Public IP configuration...")
-            
-        logger.info(f"Establishing secure database connection to Cloud SQL: {INSTANCE_CONNECTION_NAME}")
-        return _CONNECTOR.connect(
-            INSTANCE_CONNECTION_NAME,
-            "psycopg",
-            user=DB_USER,
-            password=DB_PASSWORD,
-            db=DB_NAME,
-            ip_type=ip_type
+
+        db_user = config.get("database.user", "postgres")
+        db_password = config.get("database.password")
+        db_name = config.get("database.name", "vector")
+
+        class CloudSQLConnection(psycopg.Connection):
+            @classmethod
+            def connect(cls, conninfo="", **kwargs):
+                logger.debug(f"Establishing pooled connection to Cloud SQL: {instance_connection_name}")
+                return _CONNECTOR.connect(
+                    instance_connection_name,
+                    "psycopg",
+                    user=db_user,
+                    password=db_password,
+                    db=db_name,
+                    ip_type=ip_type,
+                    **kwargs
+                )
+
+        logger.info(
+            f"Initializing Cloud SQL ConnectionPool (min={min_pool_size}, max={max_pool_size}) for {instance_connection_name}"
+        )
+        _POOL = ConnectionPool(
+            min_size=min_pool_size,
+            max_size=max_pool_size,
+            kwargs={"autocommit": True},
+            timeout=pool_timeout,
+            max_idle=max_idle,
+            max_lifetime=max_lifetime,
+            reconnect_timeout=pool_timeout,
+            connection_class=CloudSQLConnection,
+            close_returns=True,
+            open=True
         )
     else:
-        logger.debug(f"Connecting to Postgres database '{DB_NAME}' via TCP socket at {DB_HOST}:{DB_PORT}")
-        db_conn = f"host={DB_HOST} port={DB_PORT} dbname={DB_NAME} user={DB_USER} password={DB_PASSWORD}"
-        return psycopg.connect(db_conn)
+        db_host = config.get("database.host", "127.0.0.1")
+        db_port = config.get("database.port", 5432)
+        db_name = config.get("database.name", "vector")
+        db_user = config.get("database.user", "postgres")
+        db_password = config.get("database.password")
+
+        logger.info(
+            f"Initializing Postgres TCP ConnectionPool (min={min_pool_size}, max={max_pool_size}) for '{db_name}' at {db_host}:{db_port}"
+        )
+        db_conn = f"host={db_host} port={db_port} dbname={db_name} user={db_user} password={db_password}"
+        _POOL = ConnectionPool(
+            conninfo=db_conn,
+            kwargs={"autocommit": True},
+            min_size=min_pool_size,
+            max_size=max_pool_size,
+            timeout=pool_timeout,
+            max_idle=max_idle,
+            max_lifetime=max_lifetime,
+            reconnect_timeout=pool_timeout,
+            close_returns=True,
+            open=True
+        )
+
+    return _POOL
+
+
+def get_connection():
+    """Acquire and return a connection from the connection pool.
+
+    With `close_returns=True`, calling `conn.close()` or using `with closing(get_connection()) as conn:`
+    will automatically return the connection back to the pool.
+    """
+    pool = get_pool()
+    return pool.getconn()
+
+
+def close_pool():
+    """Close the active connection pool and clean up connector resources."""
+    global _POOL, _CONNECTOR
+    if _POOL is not None:
+        try:
+            if not _POOL.closed:
+                logger.info("Closing database connection pool...")
+                _POOL.close(timeout=2.0)
+        except Exception as e:
+            logger.warning(f"Error while closing database connection pool: {e}")
+        finally:
+            _POOL = None
+    if _CONNECTOR is not None:
+        try:
+            logger.info("Closing Cloud SQL connector...")
+            _CONNECTOR.close()
+        except Exception as e:
+            logger.warning(f"Error while closing Cloud SQL connector: {e}")
+        finally:
+            _CONNECTOR = None
+
+
+# Automatically close connection pool before Python interpreter shutdown/finalization
+import atexit
+atexit.register(close_pool)

@@ -295,3 +295,58 @@ Missing internal runbook for Redis Sentinel automated failover procedures.
     assert "### 1. 📌 Diagnosis" in res["response"]
 
 
+def test_rag_pipeline_retrieve_and_generate_stream():
+    """Verify that retrieve_and_generate_stream invokes generate_content_stream and returns streaming iterator."""
+    mock_emb_service = MagicMock()
+    mock_emb_service.get_dense_embedding.return_value = [0.2] * 768
+
+    mock_retriever = MagicMock()
+    mock_retriever.hybrid_search_rrf.return_value = [
+        {"content": "Streaming runbook chunk", "metadata": {"source_url": "https://wiki/stream"}}
+    ]
+
+    mock_reranker = MagicMock()
+    mock_reranker.rank_candidates.return_value = [
+        {"content": "Streaming runbook chunk", "metadata": {"source_url": "https://wiki/stream"}}
+    ]
+
+    # Mock chunk stream
+    mock_chunk1 = MagicMock()
+    mock_chunk1.text = "Token 1 "
+    mock_chunk2 = MagicMock()
+    mock_chunk2.text = "Token 2"
+    mock_stream = iter([mock_chunk1, mock_chunk2])
+
+    mock_gen_client = MagicMock()
+    mock_gen_client.models.generate_content_stream.return_value = mock_stream
+
+    pipeline = RAGPipeline(
+        embedding_service=mock_emb_service,
+        retriever=mock_retriever,
+        reranker=mock_reranker,
+        generator_client=mock_gen_client,
+        generator_model="gemini-2.5-flash",
+    )
+
+    stream_res, retrieved_contexts, sources = pipeline.retrieve_and_generate_stream(
+        query="Streaming test query",
+        use_hybrid=True,
+        use_reranker=True,
+    )
+
+    assert retrieved_contexts == [{"content": "Streaming runbook chunk", "metadata": {"source_url": "https://wiki/stream"}}]
+    assert sources == ["https://wiki/stream"]
+    mock_gen_client.models.generate_content_stream.assert_called_once()
+
+    # Verify iteration over stream chunks
+    tokens = [c.text for c in stream_res]
+    assert tokens == ["Token 1 ", "Token 2"]
+
+    # Verify response parsing
+    full_text = "".join(tokens)
+    final_text, gaps = pipeline.parse_response_text(full_text, sources)
+    assert "Token 1 Token 2" in final_text
+    assert "Sources:\n- https://wiki/stream" in final_text
+
+
+

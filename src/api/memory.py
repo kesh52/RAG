@@ -1,5 +1,4 @@
-"""Conversational memory management and query contextualization for multi-turn RAG."""
-
+import re
 import logging
 from typing import Any
 from google import genai
@@ -69,13 +68,16 @@ Standalone Search Query:"""
 
         return new_query.strip()
 
-    def generate_chat_title(self, query: str, response: str) -> str:
-        """Generate a short (3-5 words) descriptive title for a newly initiated chat session."""
-        prompt = f"""Generate a concise, descriptive title (maximum 3 to 5 words) for a technical support chat based on the initial exchange below.
-Do not use quotes, punctuation, or generic titles like 'New Chat' or 'Help Request'.
+    def generate_chat_title(self, query: str, response: str = "") -> str:
+        """Generate a short (3-5 words) descriptive title for a chat session based on user input."""
+        prompt = f"""You are naming a technical chat conversation based on the user's inquiry.
+Create a short, specific title (strictly 3 to 5 words).
+- Focus on the core topic, service name, error code, or task described in the user request.
+- Do NOT use quotes, quotation marks, periods, prefixes like 'Title:', or generic words like 'Question' or 'Help'.
+- Use Title Case.
 
 User Request: {query[:300]}
-Assistant Response: {response[:300]}
+Assistant Context: {response[:200] if response else ''}
 
 Title:"""
 
@@ -84,19 +86,23 @@ Title:"""
                 model=self.model_name,
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(
-                    temperature=0.2,
-                    max_output_tokens=20,
+                    temperature=0.1,
+                    max_output_tokens=25,
                 ),
             )
-            title = res.text.strip().replace('"', '').replace("'", "")
-            if title and len(title) <= 60:
-                return title
+            raw = res.text.strip()
+            # Clean prefixes, quotes, markdown, and trailing punctuation
+            cleaned = re.sub(r"^(Title\s*:\s*|#+\s*|\*+\s*)", "", raw, flags=re.IGNORECASE).strip()
+            cleaned = cleaned.strip('"\'`*').rstrip('.').strip()
+            if cleaned and 2 <= len(cleaned.split()) <= 8 and len(cleaned) <= 60:
+                return cleaned
         except Exception as e:
             logger.warning(f"Error generating chat title: {e}")
 
-        # Fallback to truncated user query
-        words = query.strip().split()
-        return " ".join(words[:5]).capitalize() if words else "Technical Discussion"
+        # Fallback to cleaned first 4-5 words of user query
+        words = [w for w in re.sub(r"[^\w\s]", "", query).split() if len(w) > 1]
+        fallback = " ".join(words[:4]).title() if words else "Technical Discussion"
+        return fallback if fallback else "Technical Discussion"
 
     def format_generation_contents(
         self,
@@ -105,8 +111,12 @@ Title:"""
         retrieved_contexts: list[dict[str, Any]],
         attached_file_bytes: bytes | None = None,
         attached_mime_type: str | None = None,
+        prompt_template: str | None = None,
     ) -> list[Any] | str:
         """Construct multimodal prompt contents including retrieved chunks, past turns, and current query."""
+        from src.utils.config import config
+        from src.pipeline.prompts import format_prompt, DEFAULT_STANDARD_PROMPT, DEFAULT_ATTACHED_REPORT_PROMPT
+
         # 1. Format internal runbook context block
         context_parts = []
         for doc in retrieved_contexts:
@@ -126,57 +136,28 @@ Title:"""
                 if "<!-- DOCUMENTATION_GAPS -->" in c:
                     c = c.split("<!-- DOCUMENTATION_GAPS -->")[0].strip()
                 history_lines.append(f"**{r}**: {c}")
-            history_formatted = "\n\nRecent Conversation History:\n" + "\n\n".join(history_lines) + "\n\n"
+            history_formatted = "\n\nRecent Conversation History:\n" + "\n\n".join(history_lines) + "\n"
 
-        # 3. Assemble prompt instruction
+        full_context = context_block + (f"\n{history_formatted}" if history_formatted else "")
+
+        # 3. Assemble prompt instruction based on template or dynamic default
         if attached_file_bytes and attached_mime_type and attached_mime_type != "application/octet-stream":
-            instruction = f"""Internal Runbooks & Knowledge Base Context:
-{context_block}
-{history_formatted}
-User Request: {current_query}
-
-You are an expert technical remediation specialist assisting an engineer.
-Analyze the attached report/document alongside the internal runbooks and conversation history provided above.
-Strictly structure your response into the following clear sections with these exact Markdown headers:
-
-### 1. 📌 Issue Diagnosis & Summary
-Briefly summarize the key findings, error codes, or vulnerabilities identified in the attached report.
-
-### 2. 📚 Internal Runbook Guidance (Verified from Company Documentation)
-Provide the explicit operational steps, configuration parameters, and policies directly supported by the internal context above. Every statement or step in this section MUST be grounded in the internal documentation. Inline cite the internal source URLs like `[Source: URL]`.
-
-### 3. 🌐 General Industry Best Practices (General LLM Knowledge)
-Provide complementary technical explanations, industry standards, or architectural advice that are NOT explicitly mentioned in the internal documentation. Clearly mark them as general knowledge.
-
-### 4. ✅ Verification & Prevention
-Explain how to verify the resolution succeeded and prevent recurrence.
-
-At the very end of your response, record any missing internal documentation strictly inside these tags:
-<!-- DOCUMENTATION_GAPS -->
-Explain what runbooks, policies, or topics are missing from the internal knowledge base for this request (or write NONE if fully covered).
-<!-- END_DOCUMENTATION_GAPS -->"""
-
+            tpl = prompt_template
+            if not tpl:
+                dynamic_att = config.get_dynamic("pipeline.attached_prompt_template")
+                tpl = dynamic_att if dynamic_att else DEFAULT_ATTACHED_REPORT_PROMPT
+            
+            instruction = format_prompt(tpl, full_context, current_query)
             return [
                 genai_types.Part.from_bytes(data=attached_file_bytes, mime_type=attached_mime_type),
                 instruction,
             ]
         else:
-            prompt = f"""Internal Knowledge Base Context:
-{context_block}
-{history_formatted}
-Question: {current_query}
+            tpl = prompt_template
+            if not tpl:
+                dynamic_tpl = config.get_dynamic("pipeline.prompt_template")
+                tpl = dynamic_tpl if dynamic_tpl else DEFAULT_STANDARD_PROMPT
+            
+            return format_prompt(tpl, full_context, current_query)
 
-Answer the question clearly and distinguish between internal documentation and general knowledge using these exact headers:
-
-### 📚 Internal Documentation Guidance (Verified from Company Docs)
-Directly answer based on the internal context provided above. Only include facts that exist in the internal context, and inline cite the source URLs like `[Source: URL]`.
-
-### 🌐 General Knowledge & Context (General LLM Knowledge)
-Provide helpful supplementary technical explanation, industry background, or standard best practices if relevant, clearly marked as general knowledge.
-
-At the very end of your response, record any missing internal documentation strictly inside these tags:
-<!-- DOCUMENTATION_GAPS -->
-Explain what runbooks, policies, or topics are missing from the internal knowledge base for this question (or write NONE if fully covered).
-<!-- END_DOCUMENTATION_GAPS -->"""
-            return prompt
 

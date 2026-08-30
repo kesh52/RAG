@@ -105,25 +105,45 @@ with st.sidebar:
 
     active_id = st.session_state["active_session_id"]
 
-    # Render Sessions List in Sidebar
-    for s in sessions:
-        sid_str = str(s["id"])
-        is_active = (sid_str == active_id)
-        btn_label = f"{'💬 ' if not is_active else '👉 '} {s['title'][:26]}"
-        if st.button(
-            btn_label,
-            key=f"sess_btn_{sid_str}",
-            use_container_width=True,
-            type="secondary" if not is_active else "primary",
-        ):
-            st.session_state["active_session_id"] = sid_str
-            st.rerun()
+    # Render Sessions List in Sidebar with individual delete buttons
+    if not sessions:
+        st.caption("No conversations yet.")
+    else:
+        for s in sessions:
+            sid_str = str(s["id"])
+            is_active = (sid_str == active_id)
+            btn_label = f"{'💬 ' if not is_active else '👉 '} {s['title'][:22]}"
+            
+            c_item, c_del = st.columns([5, 1.2])
+            with c_item:
+                if st.button(
+                    btn_label,
+                    key=f"sess_btn_{sid_str}",
+                    use_container_width=True,
+                    type="secondary" if not is_active else "primary",
+                ):
+                    st.session_state["active_session_id"] = sid_str
+                    st.rerun()
+            with c_del:
+                if st.button("🗑️", key=f"del_sidebar_{sid_str}", help=f"Delete '{s['title']}'"):
+                    chat_store.delete_chat_session(sid_str, hard_delete=True)
+                    if st.session_state.get("active_session_id") == sid_str:
+                        st.session_state.pop("active_session_id", None)
+                    st.rerun()
 
     st.markdown("---")
+    # Load dynamic system defaults
+    dyn_hybrid = bool(config.get_dynamic("pipeline.use_hybrid", True))
+    dyn_reranker = bool(config.get_dynamic("pipeline.use_reranker", True))
+    dyn_model = config.get_dynamic("models.generation", "gemini-2.5-flash")
+    model_opts = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+    m_idx = model_opts.index(dyn_model) if dyn_model in model_opts else 0
+
     with st.expander("⚙️ Pipeline Settings", expanded=False):
-        use_hybrid = st.toggle("Hybrid Search (RRF)", value=True, key="sb_hybrid")
-        use_reranker = st.toggle("Vertex Semantic Reranker", value=True, key="sb_reranker")
-        model_name = st.selectbox("Model", ["gemini-2.5-flash", "gemini-2.5-pro"], index=0, key="sb_model")
+        use_hybrid = st.toggle("Hybrid Search (RRF)", value=dyn_hybrid, key="sb_hybrid")
+        use_reranker = st.toggle("Vertex Semantic Reranker", value=dyn_reranker, key="sb_reranker")
+        model_name = st.selectbox("Model", model_opts, index=m_idx, key="sb_model")
+
 
 
 # ---------------------------------------------------------------------------
@@ -132,16 +152,23 @@ with st.sidebar:
 active_session = chat_store.get_chat_session(st.session_state["active_session_id"])
 
 if not active_session:
-    st.warning("Select or create a conversation from the sidebar.")
-    st.stop()
+    st.session_state.pop("active_session_id", None)
+    st.rerun()
 
-# Header Toolbar
-col_title, col_actions = st.columns([3, 1])
+# Header Toolbar with Title, Rename, Export, and Delete
+col_title, col_actions = st.columns([3, 2])
 with col_title:
     st.header(f"💬 {active_session['title']}")
 with col_actions:
-    col_exp, col_del = st.columns(2)
-    with col_exp:
+    c_ren, c_exp, c_del = st.columns([1, 1, 1.2])
+    with c_ren:
+        with st.popover("✏️", help="Rename conversation"):
+            new_title_val = st.text_input("New title", value=active_session["title"], key=f"ren_input_{active_session['id']}")
+            if st.button("Save", key=f"btn_save_ren_{active_session['id']}"):
+                if new_title_val.strip():
+                    chat_store.update_chat_session(active_session["id"], title=new_title_val.strip())
+                    st.rerun()
+    with c_exp:
         try:
             exp_data = chat_store.export_chat_session(active_session["id"], export_format="markdown")
             st.download_button(
@@ -150,12 +177,13 @@ with col_actions:
                 file_name=exp_data["filename"],
                 mime="text/markdown",
                 help="Download conversation as Markdown",
+                key=f"btn_exp_{active_session['id']}",
             )
         except Exception:
             pass
-    with col_del:
-        if st.button("🗑️", help="Archive chat", key="btn_del_chat"):
-            chat_store.delete_chat_session(active_session["id"], hard_delete=False)
+    with c_del:
+        if st.button("🗑️ Delete", type="secondary", help="Permanently delete this chat", key=f"btn_del_header_{active_session['id']}"):
+            chat_store.delete_chat_session(active_session["id"], hard_delete=True)
             st.session_state.pop("active_session_id", None)
             st.rerun()
 
@@ -255,62 +283,84 @@ if user_prompt:
             file_data=att_bytes,
         )
 
-    # 3. Multi-Turn RAG Execution
-    with st.spinner("🧠 Thinking & searching knowledge base..."):
-        pipeline = get_default_pipeline()
-        mem_mgr = ConversationalMemoryManager(
-            genai_client=pipeline.generator_client,
-            model_name=pipeline.generator_model,
-        )
+    # 3. Render user message immediately
+    with st.chat_message("user", avatar="👤"):
+        if att_bytes and att_filename:
+            st.markdown(
+                f"<div class='attachment-chip'>📎 <strong>Attached:</strong> {att_filename} ({att_mime}, {len(att_bytes)} bytes)</div>",
+                unsafe_allow_html=True,
+            )
+        st.markdown(user_prompt)
 
-        prior_history = [m for m in messages if str(m["id"]) != str(user_msg["id"])]
-        condensed_query = mem_mgr.condense_query(prior_history, user_prompt)
-        search_query = condensed_query
+    # 4. Stream Assistant Response in Real Time
+    with st.chat_message("assistant", avatar="🤖"):
+        with st.spinner("🧠 Searching knowledge base..."):
+            pipeline = get_default_pipeline()
+            mem_mgr = ConversationalMemoryManager(
+                genai_client=pipeline.generator_client,
+                model_name=pipeline.generator_model,
+            )
 
-        if att_bytes and att_mime and att_mime.startswith("text/"):
-            try:
-                snip = att_bytes.decode("utf-8", errors="ignore")[:600].strip()
-                if snip:
-                    search_query = f"{condensed_query}\n[Report Snippet: {snip}]"
-            except Exception:
-                pass
+            prior_history = [m for m in messages if str(m["id"]) != str(user_msg["id"])]
+            condensed_query = mem_mgr.condense_query(prior_history, user_prompt)
+            search_query = condensed_query
 
-        t0 = time.time()
-        q_vec = pipeline.embedding_service.get_dense_embedding(search_query)
-        p_hybrid = st.session_state.get("sb_hybrid", True)
-        p_rerank = st.session_state.get("sb_reranker", True)
+            if att_bytes and att_mime and att_mime.startswith("text/"):
+                try:
+                    snip = att_bytes.decode("utf-8", errors="ignore")[:600].strip()
+                    if snip:
+                        search_query = f"{condensed_query}\n[Report Snippet: {snip}]"
+                except Exception:
+                    pass
 
-        if p_hybrid:
-            candidates = pipeline.retriever.hybrid_search_rrf(search_query, q_vec, limit=5)
-        else:
-            candidates = pipeline.retriever.vector_search(q_vec, limit=5)
+            t0 = time.time()
+            q_vec = pipeline.embedding_service.get_dense_embedding(search_query)
+            p_hybrid = st.session_state.get("sb_hybrid", True)
+            p_rerank = st.session_state.get("sb_reranker", True)
 
-        if p_rerank:
-            retrieved_docs = pipeline.reranker.rank_candidates(search_query, candidates, top_n=2)
-        else:
-            retrieved_docs = candidates[:2]
+            dyn_pool = int(config.get_dynamic("pipeline.pool_size", 5))
+            dyn_top_k = int(config.get_dynamic("pipeline.final_top_k", 2))
 
-        sources = []
-        for doc in retrieved_docs:
-            meta = doc.get("metadata") or {}
-            url = meta.get("image_url") or meta.get("pdf_url") or meta.get("source_url")
-            if url and url not in sources:
-                sources.append(url)
+            if p_hybrid:
+                candidates = pipeline.retriever.hybrid_search_rrf(search_query, q_vec, limit=dyn_pool)
+            else:
+                candidates = pipeline.retriever.vector_search(q_vec, limit=dyn_pool)
 
-        prompt_contents = mem_mgr.format_generation_contents(
-            history=prior_history,
-            current_query=user_prompt,
-            retrieved_contexts=retrieved_docs,
-            attached_file_bytes=att_bytes,
-            attached_mime_type=att_mime,
-        )
+            if p_rerank:
+                retrieved_docs = pipeline.reranker.rank_candidates(search_query, candidates, top_n=dyn_top_k)
+            else:
+                retrieved_docs = candidates[:dyn_top_k]
 
-        gen_model = st.session_state.get("sb_model", "gemini-2.5-flash")
-        gen_res = pipeline.generator_client.models.generate_content(
+            sources = []
+            for doc in retrieved_docs:
+                meta = doc.get("metadata") or {}
+                url = meta.get("image_url") or meta.get("pdf_url") or meta.get("source_url")
+                if url and url not in sources:
+                    sources.append(url)
+
+            prompt_contents = mem_mgr.format_generation_contents(
+                history=prior_history,
+                current_query=user_prompt,
+                retrieved_contexts=retrieved_docs,
+                attached_file_bytes=att_bytes,
+                attached_mime_type=att_mime,
+            )
+
+            gen_model = st.session_state.get("sb_model", "gemini-2.5-flash")
+
+        # Stream generation from Gemini live to UI
+        stream_res = pipeline.generator_client.models.generate_content_stream(
             model=gen_model,
             contents=prompt_contents,
         )
-        raw_text = gen_res.text.strip()
+
+        def text_stream_iter():
+            for chunk in stream_res:
+                chunk_text = chunk.text or ""
+                if chunk_text:
+                    yield chunk_text
+
+        raw_text = st.write_stream(text_stream_iter())
         latency_ms = int((time.time() - t0) * 1000)
 
         # Parse documentation gaps
@@ -325,7 +375,7 @@ if user_prompt:
         if sources and "Sources:" not in raw_text:
             raw_text += "\n\nSources:\n" + "\n".join(f"- {s}" for s in sources)
 
-        # 4. Save Assistant Message in Database
+        # 5. Save Assistant Message in Database
         chat_store.add_chat_message(
             session_id=active_session["id"],
             role="assistant",
@@ -338,11 +388,13 @@ if user_prompt:
             latency_ms=latency_ms,
         )
 
-        # Auto-title if first message
-        if len(prior_history) == 0:
+        # 6. Auto-title conversation based on user input if currently default or first turn
+        current_title = active_session.get("title", "")
+        if len(prior_history) == 0 or current_title in ("New Conversation", "New Chat", "Untitled", "", None):
             try:
                 new_title = mem_mgr.generate_chat_title(user_prompt, raw_text)
-                chat_store.update_chat_session(active_session["id"], title=new_title)
+                if new_title:
+                    chat_store.update_chat_session(active_session["id"], title=new_title)
             except Exception:
                 pass
 

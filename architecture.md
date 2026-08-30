@@ -10,7 +10,7 @@ This document describes the modular object-oriented design of the RAG pipeline.
 | **`PostgresRetriever`** | Queries PostgreSQL for matching document chunks. Supports pure vector search (pgvector) and hybrid sparse/dense search merged using Reciprocal Rank Fusion (RRF). | `vector_search()`, `hybrid_search_rrf()` |
 | **`VertexReranker`** | Reranks Stage 1 candidates using cross-encoder scoring (Vertex AI Semantic Ranker) to eliminate false positives. | `rank_candidates()` |
 | **`RAGPipeline`** | Orchestrates the end-to-end RAG flow: embeds the query, retrieves candidates, reranks them, constructs the context prompt, and generates the final answer. | `retrieve_and_generate()` |
-| **`db` (Module helper)** | Manages database connections dynamically, using the native `google-cloud-sql-connector` if configured or falling back to TCP socket connections. | `get_connection()` |
+| **`db` (Module helper)** | Manages database connection pooling dynamically via `psycopg_pool.ConnectionPool`, supporting both native `google-cloud-sql-connector` and direct TCP socket connections. | `get_pool()`, `get_connection()`, `close_pool()` |
 | **`APIConfluenceClient`** | Fetches XHTML storage data and absolute links from Confluence pages using standard HTTP authentication. | `get_page_content_and_links(page_id)` |
 | **`RecursiveCrawler`** | Orchestrates BFS crawling starting from a root page, enforcing a maximum depth constraint of 2 and skipping circular references. | `crawl(root_id)` |
 | **`RecursiveTextChunker`** | Splits structured plain text into overlap-aware segments using recursive delimiter fallback boundaries (`\n\n`, `\n`, ` `, `""`). | `split_text(text)` |
